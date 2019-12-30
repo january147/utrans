@@ -8,6 +8,9 @@ import socket
 import sys
 import logging
 
+# current problems
+# 1. not yet deal with exceptions
+
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("utrans")
 
@@ -15,6 +18,8 @@ usage='''
 trans_file receive [-p <port>] [-o <filename>]
 trans_file send -f <file> -d <ip> [-p <port>]
 '''
+
+BLANK_STR = ""
 
 class CommandManager:
     S_NULL = 'null'
@@ -56,6 +61,9 @@ class CommandManager:
             self.status = CommandManager.S_RECEIVING
             return False
     
+    # The method takes a socket object as parameter and calls its recv method to receive data.
+    # It calls parse_cmd_from_bytes several times if necessary to try receiving a complete cmd,
+    # and then returns the status of the operation.
     def parse_cmd_from_ssk(self, ssk):
         while True:
             data = ssk.recv(4096)
@@ -155,12 +163,15 @@ class Utrans:
         pass
     
     def send_file(self, filepath):
+        # read filename and file size
         filesize = os.path.getsize(filepath)
         filename = os.path.basename(filepath)
         packed_cmd = CommandManager.pack_send_file_cmd(filename, filesize)
         ssk = self.ssk
         cmd_mngr = self.cmd_mngr
+        # send cmd
         ssk.send(packed_cmd)
+        # get reply
         if cmd_mngr.parse_cmd_from_ssk(ssk) == CommandManager.S_ABORT:
             logger.debug("connection closed by peer")
             return False
@@ -168,12 +179,14 @@ class Utrans:
         if cmd["status"] != "accept":
             logger.debug("peer reject")
             return False
+        # start sending file
         with open(filepath, "rb") as f:
             while True:
                 data = f.read(4096)
                 if len(data) == 0:
                     break
                 ssk.send(data)
+        # get reply
         if cmd_mngr.parse_cmd_from_ssk(ssk) == CommandManager.S_ABORT:
             logger.debug("connection closed by peer")
             return False
@@ -184,7 +197,28 @@ class Utrans:
         return True
         
     def send_message(self, message):
-        pass
+        msg_size = len(message)
+        packed_cmd = self.cmd_mngr.pack_send_message_cmd(message)
+        self.ssk.send(packed_cmd)
+        if msg_size > CommandManager.MSG_MAX:
+            if self.cmd_mngr.parse_cmd_from_ssk(self.ssk) == CommandManager.S_ABORT:
+                logger.debug("connection closed by peer")
+                return False
+            cmd = cmd_mngr.get()
+            if cmd["status"] != "accept":
+                logger.debug("peer reject")
+                return False
+            self.ssk.send(message.encode(encoding="utf8"))
+        if self.cmd_mngr.parse_cmd_from_ssk(self.ssk) == CommandManager.S_ABORT:
+                logger.debug("connection closed by peer")
+                return False
+        cmd = cmd_mngr.get()
+        if cmd["status"] != "ok":
+            logger.debug("peer responsed failed")
+            return False
+        return True
+        
+        
 
     def request_file(self, filepath):
         pass
@@ -229,7 +263,45 @@ class Utrans:
         return True
 
     def receive_message(self, cmd):
-        pass
+        if "size" not in cmd.keys():
+            msg = cmd["content"].decode(encoding="utf8")
+        else:
+            msg_size = int(cmd["size"])
+            left_size = msg_size
+            if msg_size > 4*1024*1024:
+                packed_cmd = self.cmd_mngr.pack_reject_reply()
+                self.ssk.send(packed_cmd)
+                return ''
+            msg = ''
+            # todo: change this to be configurable in config
+            self.ssk.settimeout(5)
+            while left_size > 0:
+                try:
+                    data = self.ssk.recv(4096)
+                except:
+                    break
+                split_size = len(data)
+                if split_size == 0:
+                    break
+                if left_size >= split_size:
+                    left_size -= split_size
+                else:
+                    split_size = left_size
+                    left_size = 0
+                msg += data[0:split_size].decode(encoding="utf8")
+            if left_size > 0:
+                if split_size == 0:
+                    logger.debug("peer close connection")
+                else:
+                    logger.debug("data not complete")
+                    packed_cmd = self.cmd_mngr.pack_failed_reply()
+                    self.ssk.send(packed_cmd)
+                return ''
+        # success to receive message
+        packed_cmd = self.cmd_mngr.pack_ok_reply()
+        self.ssk.send(packed_cmd)
+        return msg
+
     
 
 class Server:
