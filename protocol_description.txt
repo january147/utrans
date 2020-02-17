@@ -63,3 +63,13 @@ protocol descrption
         |-- A [message] ---> B
             |-- A <--- B[^type:res/status:ok$]
             |-- A <--- B[^type:res/status:failed$]
+
+4. service discovery
+
+  The server sends hello messages at some specific port periodically through udp to tell clients there's a utrans service.
+
+    4.1 hello message
+
+      utrans:port
+
+    

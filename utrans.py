@@ -7,6 +7,9 @@ import os
 import socket
 import sys
 import logging
+import threading
+import _thread
+import time
 
 # current problems
 # 1. not yet deal with exceptions
@@ -31,9 +34,9 @@ class CommandManager:
     MSG_MAX = 100
 
     def __init__(self):
-        self.init()
+        self.reset()
 
-    def init(self):
+    def reset(self):
         self.values = dict()
         self.status = CommandManager.S_NULL
         self.raw_cmd = b""
@@ -47,7 +50,6 @@ class CommandManager:
         if self.status == CommandManager.S_OK:
             raise RuntimeError('No more data needed')
         if self.status == CommandManager.S_NULL and cmd_data[0] != CommandManager.F_START:
-            import pdb; pdb.set_trace()
             logger.debug(cmd_data)
             raise RuntimeError("invalid cmd")
         if self.status == CommandManager.S_ABORT:
@@ -72,7 +74,7 @@ class CommandManager:
 
     def get(self):
         cmd_dict = self.values
-        self.init()
+        self.reset()
         return cmd_dict
 
     # when receiveCmd return true, call this methodc      
@@ -154,10 +156,31 @@ class CommandManager:
         return CommandManager.pack_cmd(cmd)
 
 class Utrans:
-
-    def __init__(self, ssk, cmd_mngr):
-        self.ssk = ssk
+    DATA_REV_TIMEOUT = 5
+    SERVICE_DISCOVERY_PORT = 9999
+    SERVICE_DISCOVERY_BROADCAST_ADDRESS = ("255.255.255.255", 9999)
+    SERVICE_DISCOVERY_RECEIVE_ADDRESS = ("0.0.0.0", 9999)
+    
+    def __init__(self, cmd_mngr = None, session_sk = None):
+        self.ssk = session_sk
         self.cmd_mngr = cmd_mngr
+        self.available_servers = []
+        self.service_discovering = False
+        self.srvc_dscvr_sk = None
+        if self.cmd_mngr == None:
+            self.cmd_mngr = CommandManager()
+
+        # A connection session may not start when the object is created, and we can't create a session socket.
+
+    def init_service_discovery(self):
+        if self.srvc_dscvr_sk == None:
+            self.srvc_dscvr_sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # To enable broadcast
+            self.srvc_dscvr_sk.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            self.srvc_dscvr_sk.bind(Utrans.SERVICE_DISCOVERY_RECEIVE_ADDRESS)
+
+    def new_session(self, ssk):
+        self.ssk = ssk         
     
     def authenticate(self):
         pass
@@ -204,7 +227,7 @@ class Utrans:
             if self.cmd_mngr.parse_cmd_from_ssk(self.ssk) == CommandManager.S_ABORT:
                 logger.debug("connection closed by peer")
                 return False
-            cmd = cmd_mngr.get()
+            cmd = self.cmd_mngr.get()
             if cmd["status"] != "accept":
                 logger.debug("peer reject")
                 return False
@@ -212,14 +235,12 @@ class Utrans:
         if self.cmd_mngr.parse_cmd_from_ssk(self.ssk) == CommandManager.S_ABORT:
                 logger.debug("connection closed by peer")
                 return False
-        cmd = cmd_mngr.get()
+        cmd = self.cmd_mngr.get()
         if cmd["status"] != "ok":
             logger.debug("peer responsed failed")
             return False
         return True
         
-        
-
     def request_file(self, filepath):
         pass
 
@@ -257,10 +278,10 @@ class Utrans:
                 logger.debug("data not complete")
                 packed_cmd = self.cmd_mngr.pack_failed_reply()
                 self.ssk.send(packed_cmd)
-            return False
+            return (False, filename, filesize)
         packed_cmd = self.cmd_mngr.pack_ok_reply()
         self.ssk.send(packed_cmd)
-        return True
+        return (True, filename, filesize)
 
     def receive_message(self, cmd):
         if "size" not in cmd.keys():
@@ -301,45 +322,114 @@ class Utrans:
         packed_cmd = self.cmd_mngr.pack_ok_reply()
         self.ssk.send(packed_cmd)
         return msg
-
     
+    def send_service_discovery_message(self):
+        if self.srvc_dscvr_sk == None:
+            logger.warning("service discovery not init")
+            return
+        self.srvc_dscvr_sk.sendto(b"utrans/9999", Utrans.SERVICE_DISCOVERY_BROADCAST_ADDRESS)
 
-class Server:
+    def do_discover_service(self):
+        if self.srvc_dscvr_sk == None:
+            logger.warning("service discovery not init")
+            return
+        sk = self.srvc_dscvr_sk
+        sk.settimeout(2)
+        while self.service_discovering:
+            try:
+                data, address = sk.recvfrom(4096)
+            except Exception as e:
+                print(e)
+                logger.debug("service discovery timeout")
+                continue
+            try:
+                data = data.decode(encoding="utf8")
+                data.index("utrans")
+            except:
+                logger.debug("Receive invalid service discovery message")
+                continue
+
+            if address not in self.available_servers:
+                self.available_servers.append(address)
+
+    def stop_service_discover(self):
+        self.service_discovering = False
+        logger.debug("stop service discovery")
+    
+    def start_discover_service(self, timeout = 0):
+        if self.srvc_dscvr_sk == None:
+            logger.warning("service discovery not init")
+            return
+        self.service_discovering = True
+        _thread.start_new_thread(self.do_discover_service, ())
+        logger.debug("start service discovery")
+        if timeout != 0:
+            time.sleep(timeout)
+            self.stop_service_discover()
+
+
+
+class UtransServer:
+
     def __init__(self):
-        pass
+        self.lsk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.lsk.bind(('0.0.0.0', 9999))
+        self.lsk.listen(2)
+        print("server start to listen")
+
+    def handle_client(self, ssk):
+        cmd_mngr = CommandManager()
+        utrans = Utrans(cmd_mngr, ssk)
+        while True:
+            if cmd_mngr.parse_cmd_from_ssk(ssk) == CommandManager.S_ABORT:
+                print("peer close connection")
+                break
+            cmd = cmd_mngr.get()
+            if cmd["type"] != "ask":
+                print("invalid request")
+                continue
+
+            if cmd["cmd"] == "send":
+                if cmd["datatype"] == "msg":
+                    msg = utrans.receive_message(cmd)
+                    if msg == '':
+                        print("Receive nothing")
+                        continue
+                    print("Get msg:")
+                    print(msg)
+                elif cmd["datatype"] == "file":
+                    status, filename, filesz = utrans.receive_file(cmd)
+                    if status == False:
+                        print("File transmission failed")
+                        continue
+                    print("Receive File [%s], total_size %d"%(filename, filesz))
+            elif cmd["cmd"] == "auth":
+                print("unsupport operation")
+            else:
+                print("unknown operation: %s"%(cmd["cmd"]))
+    
     def run(self):
-        listen_s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listen_s.bind(('0.0.0.0', 9999))
-        listen_s.listen(2)
-        print("server started")
         try:
             while True:
-                ssk, addr = listen_s.accept()
+                ssk, addr = self.lsk.accept()
                 print("connected with " + str(addr))
-                cmd_mngr = CommandManager()
-                utrans = Utrans(ssk, cmd_mngr)
-                while True:
-                    if cmd_mngr.parse_cmd_from_ssk(ssk) == CommandManager.S_ABORT:
-                        print("peer close connection")
-                        break
-                    cmd = cmd_mngr.get()
-                    if cmd["datatype"] == "file":
-                        utrans.receive_file(cmd)
-        except:
+                _thread.start_new_thread(self.handle_client, (ssk, ))
+        except Exception as e:
+            print(e)
             logger.debug("server exception")
         finally:
-            listen_s.close()
+            self.lsk.close()
 
-class Client:
-    
+class UtransClient:
     def __init__(self):
         pass
 
     def run(self):
         ssk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
         ssk.connect(("127.0.0.1", 9999))
         cmd_mngr = CommandManager()
-        utrans = Utrans(ssk, cmd_mngr)
+        utrans = Utrans(cmd_mngr, ssk)
         while True:
             try:
                 filepath = input("please input the filepath:\n")
@@ -348,14 +438,42 @@ class Client:
                 break
             utrans.send_file(filepath)
 
+class SD_test:
+    
+    def __init__(self):
+        pass
+    
+    def broadcast(self):
+        cmd_mgnr = CommandManager()
+        utrans = Utrans(cmd_mgnr)
+        utrans.init_service_broadcast()
+        while True:
+            utrans.send_service_discovery_message()
+            time.sleep(1)
+    
+    def receive_broadcast(self):
+        cmd_mgnr = CommandManager()
+        utrans = Utrans(cmd_mgnr)
+        utrans.init_service_broadcast()
+        utrans.start_service_discover(5)
+        print(utrans.available_servers)
+
+        
 
 def main():
-    if sys.argv[1].startswith('c'):
+    mode = sys.argv[1]
+    if mode == "c":
         client = Client()
         client.run()
-    else:
+    elif mode == "s":
         server = Server()
         server.run()
+    elif mode == "cd":
+        test = SD_test()
+        test.broadcast()
+    elif mode == "sd":
+        test = SD_test()
+        test.receive_broadcast()
 
 
 if __name__ == "__main__":
