@@ -31,6 +31,10 @@ protocol descrption
       file    the data sended is a file
   content 
       the message content
+  encode
+      plain   not encode
+      base64  base64 encode
+      AES128  encrypted by AES, key size is 128s 
   name 
       the filename
   size 
