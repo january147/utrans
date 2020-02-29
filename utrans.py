@@ -23,6 +23,71 @@ trans_file send -f <file> -d <ip> [-p <port>]
 '''
 
 BLANK_STR = ""
+def get_options(args, option_list:list):
+    arg_p = 1
+    total_arg = len(args)
+    options = {}
+    raw_arg = []
+    options_with_arg = []
+    accpet_all = False
+    for i in range(len(option_list)):
+        option_description = option_list[i]
+        if option_description == ':':
+            accpet_all = True
+            continue
+        if option_description[-1] == ':':
+            option = option_description[:-1]
+            options_with_arg.append(option)
+            option_list[i] = option
+
+
+    while arg_p < total_arg:
+        arg = args[arg_p]
+        if arg.startswith('--'):
+            name = arg[2:]
+            if not accpet_all and name not in option_list:
+                print("invalid option '%s', pos '%d'"%(name, arg_p))
+                exit(1)
+            if name not in options_with_arg:
+                options[name] = ''
+            else:
+                arg_p += 1
+                if arg_p >= len(args) or args[arg_p].startswith('-'):
+                    print("option '%s' requires an argument, pos %d"%(name, arg_p))
+                    exit(1)
+                value = args[arg_p]
+                options[name] = value
+        elif arg.startswith('-'):
+            names = arg[1:]
+            if len(names) <= 1:
+                name_likely_with_arg = names
+            else:
+                for name in names[:-1]:
+                    if not accpet_all and name not in option_list:
+                        print("invalid option '%s', pos %d"%(name, arg_p))
+                        exit(1)
+                    if name in options_with_arg:
+                        print("option '%s' requiring an argument can be put between options, pos %d"%(name, arg_p))
+                        exit(1)
+                    options[name] = ''
+                name_likely_with_arg = names[-1]
+            if not accpet_all and name_likely_with_arg not in option_list:
+                print("invalid option '%s', pos %d"%(name_likely_with_arg, arg_p))
+                exit(1)
+            if name_likely_with_arg not in options_with_arg:
+                options[name_likely_with_arg] = ''
+            else:
+                arg_p += 1
+                if arg_p >= len(args) or args[arg_p].startswith('-'):
+                    print("option '%s' requires an argument, pos %d"%(name_likely_with_arg, arg_p))
+                    exit(1)
+                value = args[arg_p]
+                options[name_likely_with_arg] = value
+        else:
+            raw_arg.append(arg)
+        arg_p += 1
+
+    return (raw_arg, options)
 
 class CommandManager:
     S_NULL = 'null'
@@ -179,12 +244,19 @@ class Utrans:
             self.srvc_dscvr_sk.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             self.srvc_dscvr_sk.bind(Utrans.SERVICE_DISCOVERY_RECEIVE_ADDRESS)
 
-    def new_session(self, ssk):
+    def set_session(self, ssk):
         self.ssk = ssk         
     
     def authenticate(self):
-        pass
+        packed_msg = 
     
+    def send_not_support_info():
+        info = {
+            "info" : "unsupported operation"
+        }
+        packed_msg = self.cmd_mngr.pack_failed_reply(info)
+        self.ssk.send(packed_msg)
+
     def send_file(self, filepath):
         # read filename and file size
         filesize = os.path.getsize(filepath)
@@ -372,6 +444,8 @@ class Utrans:
 class UtransServer:
 
     def __init__(self):
+        self.enable_broadcast = True
+        self.broadcast_interval = 2
         self.lsk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.lsk.bind(('0.0.0.0', 9999))
         self.lsk.listen(2)
@@ -404,10 +478,19 @@ class UtransServer:
                         continue
                     print("Receive File [%s], total_size %d"%(filename, filesz))
             elif cmd["cmd"] == "auth":
+                utrans.send_not_support_info()
                 print("unsupport operation")
             else:
+                utrans.send_not_support_info()
                 print("unknown operation: %s"%(cmd["cmd"]))
     
+    def broadcast(self):
+        utrans = Utrans()
+        utrans.init_service_discovery()
+        while self.enable_broadcast:
+            utrans.send_service_discovery_message()
+            time.sleep(self.broadcast_interval)
+        
     def run(self):
         try:
             while True:
@@ -421,12 +504,75 @@ class UtransServer:
             self.lsk.close()
 
 class UtransClient:
-    def __init__(self):
-        pass
+    def __init__(self, name = "utrans"):
+        self.name = name
+        self.current_connection = -1
+        self.connections = []
+
+    def init_command_line(self):
+        self.available_servers = []
+        self.connected_device = []
+
+
+    def command_line(self):
+        argv = input("%s@%s: ", self.name, str(self.current_connection)).split()
+        cmd = argv[0]
+        raw_args, options = get_options(argv)
+        if cmd == "send_file":
+            for filename in raw_args:
+                if not os.path.isfile(filename):
+                    print("%s is not a file", filename)
+                    continue
+                self.send_file(filename)
+        elif cmd == "send_msg":
+            if len(raw_args) <= 0:
+                try:
+                    message_send_mode()
+                except:
+                    continue
+            else:
+                msg = raw_args
+            self.send_message(msg)
+        elif cmd == "ls":
+            if len(raw_args) <= 0:
+
+        elif cmd == "connect":
+        elif cmd == "switch":
+        else:
+            pass
+
+    def message_send_mode(self):
+        while True:
+            msg = input("please input message to send:")
+            self.send_message(msg)
+
+
+    def set_current_connection(self, connection_num):
+        self.current_connection = connection_num
+
+    def connect(self, address):
+        sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sk.connect(address)
+        self.connections.append(sk)
+        return sk
+
+    def send_file(self, filename, dest:int = None):
+        if dest is None:
+            dest = self.current_connection
+        utrans = Utrans(session_sk=self.connections[dest])
+        utrans.send_file(filename)
+
+    def send_message(self, msg, dest:int = None):
+        if dest is None:
+            dest = self.current_connection
+        utrans = Utrans(session_sk=self.connections[dest])
+        utrans.send_message(filename)
+    
+    def autenticate(self, dest:int):
+        print("not support")
 
     def run(self):
         ssk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
         ssk.connect(("127.0.0.1", 9999))
         cmd_mngr = CommandManager()
         utrans = Utrans(cmd_mngr, ssk)
@@ -437,9 +583,9 @@ class UtransClient:
                 print("exit")
                 break
             utrans.send_file(filepath)
+    
 
 class SD_test:
-    
     def __init__(self):
         pass
     
