@@ -25,6 +25,39 @@ trans_file send -f <file> -d <ip> [-p <port>]
 '''
 
 BLANK_STR = ""
+
+def link_args(args):
+    new_args = []
+    arg_continue = False
+    arg_saved = ""
+    for item in args:
+        if arg_continue is True:
+            if item[-1] == "\"":
+                arg_continue = False
+                arg_saved += item.strip("\"")
+                new_args.append(arg_saved)
+                arg_saved = ""
+            else:
+                arg_saved += item
+            continue
+
+        if item[0] != "\"":
+            new_args.append(item)
+            continue
+
+        if item[0] == "\"":
+            if item[-1] == "\"":
+                new_args.append(item.strip("\""))
+            else:
+                arg_saved += item.strip("\"")
+                arg_continue = True
+            continue
+        
+    if arg_continue == True:
+        logger.debug("arg not complete")
+        return None
+    return new_args
+
 def get_options(args, option_list:list):
     arg_p = 1
     total_arg = len(args)
@@ -312,8 +345,6 @@ class Utrans:
             return False
         return True
         
- 
-
     def send_message(self, message:str):
         msg_size = len(message)
         encode = "plain"
@@ -564,6 +595,8 @@ class UtransClient:
         self.current_session = None
         self.sessions = {}
         self.available_servers = {}
+        self.scanner = Utrans()
+        self.scanner.init_service_discovery()
 
     def command_line(self):
         while True:
@@ -573,8 +606,9 @@ class UtransClient:
                 return 
             if len(argv) <= 0:
                 continue
+            argv = link_args(argv)
             cmd = argv[0]
-            raw_args, options = get_options(argv, [":", "auto"])
+            raw_args, options = get_options(argv, [":"])
             if cmd == "send_file":
                 for filename in raw_args:
                     if not os.path.isfile(filename):
@@ -599,19 +633,15 @@ class UtransClient:
                     print("Avaliable servers: ")
                     print(self.available_servers)
             elif cmd == "connect":
-                if "auto" in options:
+                if len(raw_args) <= 0:
                     available_server_num = len(self.available_servers)
                     if available_server_num > 1:
-                        print("more than one available server, can't auto connect")
+                        print("more than one available server, can't auto connect, please specify the target")
                     elif available_server_num <= 0:
-                        print("no available server")
+                        print("no available server, please specify the target")
                     else:
                         for key in self.available_servers.keys():
                             self.connect(self.available_servers[key])
-                    continue
-
-                if len(raw_args) <= 0:
-                    print("please specify the target")
                     continue
                 for item in raw_args:
                     if item in self.available_servers.keys():
@@ -653,18 +683,15 @@ class UtransClient:
         return result
 
     def scan_server(self):
-        utrans = Utrans()
-        utrans.init_service_discovery()
-        utrans.start_discover_service()
+        self.scanner.start_discover_service()
         print("scanning, press ctrl+c to stop")
         while True:
             try:
                 input()
             except:
                 break
-        utrans.stop_service_discover()
-        self.available_servers = self.transform_available_server(utrans.get_available_servers())
-
+        self.scanner.stop_service_discover()
+        self.available_servers = self.transform_available_server(self.scanner.get_available_servers())
 
     def message_send_mode(self):
         while True:
@@ -710,7 +737,6 @@ def main():
         server = UtransServer()
         server.run()
   
-
 
 if __name__ == "__main__":
     main()
