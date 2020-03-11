@@ -8,9 +8,11 @@ import threading
 import ctypes
 import time
 
+
 server_notice = False
 
 # interface
+
 class UtransCallback:
     def __init__(self):
         pass
@@ -20,12 +22,63 @@ class UtransCallback:
     
     def on_error(self, error):
         pass
+    
+    def on_start(self):
+        pass
 
     def on_finished(self, info):
         pass
 
     def on_progress(self, progress):
         pass
+    
+    def on_new_server(self, server_info):
+        pass
+
+    def on_stop_scan(self):
+        pass
+
+    def on_start_scan(self):
+        pass
+
+class Runnable():
+    def __init__(self, func, args, wait = 0):
+        self.wait = wait
+        self.runnable = func
+        self.args = args
+        self.ret = None
+    
+    def run(self):
+        if self.wait != 0:
+            time.sleep(self.wait)
+        self.ret = self.runnable(*self.args)         
+
+class UtransServerInfo:
+    def __init__(self, name, addr):
+        self.name = name
+        self.addr = addr
+    
+    def __str__(self):
+        return "%s:%s"%(str(self.name), str(self.addr))
+    
+    def __repr__(self):
+        return "%s:%s"%(str(self.name), str(self.addr))
+
+    
+# data
+class UtransSession:
+    CONNECTED = "connected"
+    DISCONNECTED = "disconnected"
+
+    def __init__(self, name, address, sk):
+        self.name = name
+        self.address = address
+        self.sk = sk
+        self.status = UtransSession.CONNECTED
+    
+    def __str__(self):
+        return self.name
+
 
 class ThreadInputInfo:
     def __init__(self, tid:int, input_queue:Queue):
@@ -241,15 +294,7 @@ def get_options(args, option_list:list):
         arg_p += 1
 
     return (raw_arg, options)
-
-class Runnable():
-    def __init__(self, func, args):
-        self.runnable = func
-        self.args = args
-        self.ret = None
-    
-    def run(self):
-        self.ret = self.runnable(*self.args)          
+ 
         
 
 def main():
