@@ -11,21 +11,58 @@ import _thread
 import random
 import string
 import json
+from termcolor import colored
+
+#decorators
+def deprecatedBy(replace_func):
+    def deprecated_deco(func):
+        def wrapper(*args, **kwargs):
+            text = "[Warning]%s is deprecated, consider use %s instead"%(func.__name__, replace_func.__name__)
+            print(colored(text, "yellow"))
+            return func(*args, **kwargs)
+        return wrapper
+    return deprecated_deco
+
+def deprecated(func):
+    def wrapper(*args, **kwargs):
+        text = "[Warning]%s is deprecated"%(func.__name__)
+        print(colored(text, "red"))
+        return func(*args, **kwargs)
+    return wrapper
 
 
+# utils function
 def random_str(str_len = 8):
     result_str = ''.join((random.choice(string.ascii_letters) for i in range(str_len)))
     return result_str
 
+def base64_encode_str(string:str):
+        return base64.b64encode(string.encode("utf8")).decode("utf8")
+    
+def base64_decode_str(string:str):
+    return base64.b64decode(string.encode("utf8")).decode("utf8")
+
+def print_list(l:list):
+    if len(l) == 0:
+        print("No data")
+    else:
+        for i in range(len(l)):
+            print("[%d] %s"%(i, str(l[i])))
+
+
+
 # A comparer receives two parameters. The first is the item in the list.
 # The second is the parameter you give to get_index.
-class MapList(list):
+class LookUpList(list):
 
     def __init__(self, comparer = None):
+        self.set_comparer(comparer)
+
+    def set_comparer(self, comparer = None):
         if comparer == None:
             comparer = lambda x,y : x == y
         self.comparer = comparer
-
+    
     def get_index(self, value, comparer = None):
         if comparer == None:
             comparer == self.comparer
@@ -42,6 +79,29 @@ class MapList(list):
             if comparer(self[i], value) == True:
                 result.append(i)
         return result
+
+class DictList(dict):
+    def __init__(self):
+        self.__index = 0
+    
+    def get_index(self):
+        index = self.__index
+        self.__index += 1
+        return index
+     
+    def append(self, item):
+        index = self.get_index()
+        self[index] = item
+        return index
+    
+    def show(self):
+        if len(self) == 0:
+            print("No data")
+        else:
+            for i in self.keys():
+                print("[%d] %s"%(i, str(self[i])))
+
+
 
 
 class UtransConfig(dict):
@@ -63,32 +123,7 @@ class UtransConfig(dict):
     def __set_item__(self, key, value):
         self.config[key] = value
 
-class UtransTask:
-
-    def __init__(self, uuid = None, session_index = -1):
-        if uuid == None:
-            self.uuid = random_str(10)
-        self.session_index = session_index
-        self.running = True
-    
-    def stop(self):
-        self.running = False
-
-class Runnable():
-    def __init__(self, func, args, wait = 0):
-        self.wait = wait
-        self.func = func
-        self.args = args
-        self.ret = None
-    
-    def run(self):
-        if self.wait != 0:
-            time.sleep(self.wait)
-        self.ret = self.func(*self.args)
-    
-    def async_run(self):
-        _thread.start_new_thread(self.run, ())
-
+# data 
 class UtransServerInfo:
     def __init__(self, name, addr):
         self.name = name
@@ -99,6 +134,16 @@ class UtransServerInfo:
     
     def __repr__(self):
         return "%s:%s"%(str(self.name), str(self.addr))
+
+class UtransTaskInfo:
+    def __init__(self, uuid = None, session_index = -1):
+        if uuid == None:
+            self.uuid = random_str(10)
+        self.session_index = session_index
+        self.running = True
+    
+    def stop(self):
+        self.running = False
 
 class UtransSession:
     CONNECTED = "connected"
@@ -126,6 +171,56 @@ class UtransSession:
     
     def __repr__(self):
         return "[%s]%s@%s"%(self.token, self.name, self.address)
+
+
+#deprecate, use UtransTaskInfo instead
+@deprecatedBy(UtransTaskInfo)
+class UtransTask:
+
+    def __init__(self, uuid = None, session_index = -1):
+        if uuid == None:
+            self.uuid = random_str(10)
+        self.session_index = session_index
+        self.running = True
+    
+    def stop(self):
+        self.running = False
+
+
+class RunnableTask():
+    def __init__(self, func, args, delay = 0):
+        self.wait = wait
+        self.func = func
+        self.args = args
+        self.ret = None
+    
+    def run(self):
+        if self.wait != 0:
+            time.sleep(self.wait)
+        self.ret = self.func(*self.args)
+    
+    def async_run(self):
+        return _thread.start_new_thread(self.run, ())
+    
+    def get_ret(self):
+        return self.ret
+
+#deprecate, used RunnableTask instead
+@deprecatedBy(RunnableTask)
+class Runnable():
+    def __init__(self, func, args, wait = 0):
+        self.wait = wait
+        self.func = func
+        self.args = args
+        self.ret = None
+    
+    def run(self):
+        if self.wait != 0:
+            time.sleep(self.wait)
+        self.ret = self.func(*self.args)
+    
+    def async_run(self):
+        _thread.start_new_thread(self.run, ())
 
 class ThreadInputInfo:
     def __init__(self, tid:int, input_queue:Queue):
@@ -276,6 +371,7 @@ def link_args(args):
         return None
     return new_args
 
+# Change the way of handling faults to raise exception instead of exit
 def get_options(args, option_list:list):
     arg_p = 1
     total_arg = len(args)
@@ -299,15 +395,13 @@ def get_options(args, option_list:list):
         if arg.startswith('--'):
             name = arg[2:]
             if not accpet_all and name not in option_list:
-                print("invalid option '%s', pos '%d'"%(name, arg_p))
-                exit(1)
+                raise RuntimeError("invalid option '%s', pos '%d'"%(name, arg_p))
             if name not in options_with_arg:
                 options[name] = ''
             else:
                 arg_p += 1
                 if arg_p >= len(args) or args[arg_p].startswith('-'):
-                    print("option '%s' requires an argument, pos %d"%(name, arg_p))
-                    exit(1)
+                    raise RuntimeError("option '%s' requires an argument, pos %d"%(name, arg_p))
                 value = args[arg_p]
                 options[name] = value
         elif arg.startswith('-'):
@@ -317,33 +411,26 @@ def get_options(args, option_list:list):
             else:
                 for name in names[:-1]:
                     if not accpet_all and name not in option_list:
-                        print("invalid option '%s', pos %d"%(name, arg_p))
-                        exit(1)
+                        raise RuntimeError("invalid option '%s', pos %d"%(name, arg_p))
                     if name in options_with_arg:
-                        print("option '%s' requiring an argument can be put between options, pos %d"%(name, arg_p))
-                        exit(1)
+                        raise RuntimeError("option '%s' requiring an argument can be put between options, pos %d"%(name, arg_p))
                     options[name] = ''
                 name_likely_with_arg = names[-1]
             if not accpet_all and name_likely_with_arg not in option_list:
-                print("invalid option '%s', pos %d"%(name_likely_with_arg, arg_p))
-                exit(1)
+                raise RuntimeError("invalid option '%s', pos %d"%(name_likely_with_arg, arg_p))
             if name_likely_with_arg not in options_with_arg:
                 options[name_likely_with_arg] = ''
             else:
                 arg_p += 1
                 if arg_p >= len(args) or args[arg_p].startswith('-'):
-                    print("option '%s' requires an argument, pos %d"%(name_likely_with_arg, arg_p))
-                    exit(1)
+                    raise RuntimeError("option '%s' requires an argument, pos %d"%(name_likely_with_arg, arg_p))
                 value = args[arg_p]
                 options[name_likely_with_arg] = value
         else:
             raw_arg.append(arg)
         arg_p += 1
-
     return (raw_arg, options)
  
-        
-
 def main():
     pass
 if __name__ == "__main__":

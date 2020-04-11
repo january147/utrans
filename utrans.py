@@ -16,8 +16,6 @@ import re
 import base64
 import queue
 
-# current problems
-# 1. not yet deal with exceptions
 
 #logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("utrans")
@@ -199,6 +197,449 @@ class CommandManager:
         cmd["type"] = "init"
         cmd["name"] = name
         return CommandManager.pack_cmd(cmd)
+
+class UtransDefault:
+    SERVICE_PORT = 9999
+    SCAN_PORT = 9999
+
+
+
+# seperate scanner from Utrans
+class UtransScanner:
+
+    def __init__(self, scan_port = UtransDefault.SCAN_PORT):
+        # init state
+        self.scanning = False
+        # init socket
+        self.cmd_mngr = CommandManager()
+        self.scan_sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.scan_sk.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self.scan_sk.settimeout(0.1)
+        # other data
+        self.__discovered_servers = set()
+        self.ip = socket.gethostbyname(socket.gethostname())
+
+        # scan request broadcast addr
+        ip = socket.gethostbyname(socket.gethostname()).split(".")
+        ip[3] = "255"
+        broadcast_ip = '.'.join(ip)
+        self.broadcast_addr = (broadcast_ip, scan_port)
+        self.scan_request_msg = b"utrans&scan_request"
+    
+    def __do_scan_service(self, callback:UtransCallback):
+        callback.on_start_scan()
+        while self.scanning:
+            try:
+                data, address = self.scan_sk.recvfrom(4096)
+            except socket.timeout:
+                continue
+
+            # 过滤本机发出的数据包
+            if self.ip == address[0] or address[0] == "127.0.0.1":
+                continue
+            parsed_data = self.cmd_mngr.parse_broadcast_msg(data)
+            if parsed_data == None:
+                logger.debug("Receive invalid service discovery message")
+                logger.debug(data)
+                continue
+
+            address = (address[0], parsed_data[2])
+            if address not in self.__discovered_servers:
+                self.__discovered_servers.add(address)
+                new_server = UtransServerInfo(parsed_data[1], address)
+                callback.on_new_server(new_server)
+        callback.on_stop_scan()
+
+    def __send_scan_request(self):
+        self.scan_sk.sendto(self.scan_request_msg, self.broadcast_addr)
+    
+    def set_scan_port(self, port:int):
+        self.broadcast_addr = (self.broadcast_addr[0], port)
+
+    def stop_scan(self):
+        if self.scanning == True:
+            self.scanning = False
+            self.__discovered_servers.clear()
+            logger.debug("stop service discovery")
+    
+    def start_scan(self, callback, time):
+        # broadcast scan request
+        self.__send_scan_request()
+        if self.scanning == True:
+            logger.debug("already in scanning")
+            return True
+        self.scanning = True
+        _thread.start_new_thread(self.__do_scan_service, (callback, ))
+        logger.debug("start service discovery")
+        if time != 0:
+            stop_task = Runnable(self.stop_scan_service, (), time)
+            stop_task.async_run()
+
+class UtransScanResponder:
+    def __init__(self, name = None, port = 9999):
+        if name == None:
+            self.name = socket.gethostname()
+        else:
+            self.name = name
+
+        self.service_port = port
+        self.scan_server_addr = ("0.0.0.0", port)
+
+        # set scan response message
+        self.scan_response_msg = "utrans&{name}&{port}".format(name=self.name, port=self.service_port).encode("utf8")
+        self.running = False
+    
+    def init_socket(self):
+        self.sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sk.bind(self.scan_server_addr)
+
+    def start(self):
+        self.running = True
+        self.init_socket()
+        while self.running:
+            try:
+                data, addr = self.sk.recvfrom(1024)
+            except Exception as e:
+                logger.debug("scan reponder failure")
+                print(e)
+            msg = data.decode(encoding="utf8")
+            try:
+                msg.index("utrans&scan_request")
+            except:
+                continue
+            # response
+            self.sk.sendto(self.scan_response_msg, addr)
+    
+    def stop(self):
+        self.sk.close()
+        self.running = False
+    
+    def asyn_start(self):
+        _thread.start_new_thread(self.start, ())
+
+class UtransCore:
+    NETWORK_TIMEOUT = 3
+    SPLIT_LEN = 409600
+
+    def __init__(self, sk = None):
+        self.ssk = sk
+        self.cmd_mngr = CommandManager()
+    
+    def set_socket(self, sk):
+        self.ssk = sk
+
+    def authenticate(self):
+        self.send_not_support_info()
+    
+    def send_not_support_info(self):
+        info = {
+            "info" : "unsupported operation"
+        }
+        packed_msg = self.cmd_mngr.pack_failed_reply(info)
+        self.ssk.send(packed_msg)
+
+    def send_file(self, filepath, task_info:UtransTask, callback:UtransCallback):
+        # read filename and file size
+        # make sure the file exists in high level APIs of UtransClient
+        ssk = self.ssk
+        cmd_mngr = self.cmd_mngr
+        filesize = os.path.getsize(filepath)
+        filename = os.path.basename(filepath)
+        
+        # new start callback
+        callback.on_file_send_start(filename, filesize, task_info)
+        
+        # send control info
+        filename = self.base64_encode_str(filename)
+        packed_cmd = CommandManager.pack_send_file_cmd(filename, filesize)
+        try:
+            ssk.send(packed_cmd)
+        except Exception as e:
+            logger.debug(e)
+            callback.on_file_send_error(UtransError.CONNECTION_ERROR, task_info)
+        
+        # get reply
+        self.ssk.settimeout(15)
+        if cmd_mngr.parse_cmd_from_ssk(ssk) == CommandManager.S_ABORT:
+            logger.debug("connection closed by peer")
+            callback.on_file_send_error(UtransError.CONNECTION_ERROR, task_info)
+            return False
+        cmd = cmd_mngr.get()
+        if "status" not in cmd.keys():
+            callback.on_file_send_error(UtransError.INVALID_CMD, task_info)
+            return False
+
+        if cmd["status"] != "accept":
+            logger.debug("peer reject")
+            callback.on_file_send_error(UtransError.PEER_REJECT, task_info)
+            return False
+
+        # start sending file
+        self.ssk.settimeout(UtransCore.NETWORK_TIMEOUT)
+        sended = 0
+        with open(filepath, "rb") as f:
+            while True:
+                try:
+                    data = f.read(Utrans.SPLIT_LEN)
+                except Exception as e:
+                    print(e)
+                    callback.on_file_send_error(UtransError.LOCAL_ERROR, task_info)
+                # finish read
+                if len(data) == 0:
+                    break
+                try:
+                    ssk.send(data)
+                except Exception as e:
+                    print(e)
+                    callback.on_file_send_error(UtransError.CONNECTION_ERROR, task_info)
+                sended += len(data)
+                # sending progress callback
+                progress = sended / filesize
+                # on progress callback
+                callback.on_file_sending(progress, task_info)
+                if task_info.running == False:
+                    callback.on_file_send_stop(task_info)
+                    return False
+
+        # get reply
+        if cmd_mngr.parse_cmd_from_ssk(ssk) == CommandManager.S_ABORT:
+            logger.debug("connection closed by peer")
+            callback.on_file_send_error(UtransError.CONNECTION_ERROR, uuid)
+            return False
+        cmd = cmd_mngr.get()
+        if cmd["status"] != "ok":
+            logger.debug("peer responsed failed")
+            callback.on_file_send_error(UtransError.PEER_SAY_FAILED, task_info)
+            return False
+        # success sending file
+        callback.on_file_send_finished(UtransError.OK, task_info)
+        return True
+        
+    def send_message(self, message:str, callback:UtransCallback, task_info:UtransTask):
+        msg_size = len(message)
+        encode = "plain"
+        if msg_size <= CommandManager.MSG_MAX:
+            if re.search(r"[:&]", message) != None:
+                message = self.base64_encode_str(message)
+                encode = "base64"
+        
+        # send short message
+        packed_cmd = self.cmd_mngr.pack_send_message_cmd(message, encode)
+        try:
+            self.ssk.send(packed_cmd)
+        except Exception as e:
+            print(e)
+            callback.on_msg_send_error(UtransError.CONNECTION_ERROR, task_info)
+
+        # send long message
+        if msg_size > CommandManager.MSG_MAX:
+            self.ssk.settimeout(15)
+            if self.cmd_mngr.parse_cmd_from_ssk(self.ssk) == CommandManager.S_ABORT:
+                logger.debug("connection closed by peer")
+                callback.on_msg_send_error(UtransError.CONNECTION_ERROR, task_info)
+                return False
+            self.ssk.settimeout(3)
+            cmd = self.cmd_mngr.get()
+            if "status" not in cmd.keys():
+                callback.on_msg_send_error(UtransError.INVALID_CMD, task_info)
+                return False
+            
+            if cmd["status"] != "accept":
+                logger.debug("peer reject")
+                callback.on_msg_send_error(UtransError.PEER_REJECT, task_info)
+                return False
+            try:
+                self.ssk.send(message.encode(encoding="utf8"))
+            except Exception as e:
+                print(e)
+                callback.on_msg_send_error(UtransError.INVALID_CMD, task_info)
+                
+        if self.cmd_mngr.parse_cmd_from_ssk(self.ssk) == CommandManager.S_ABORT:
+                logger.debug("connection closed by peer")
+                callback.on_msg_send_error(UtransError.CONNECTION_ERROR, task_info)
+                return False
+        cmd = self.cmd_mngr.get()
+        if "status" not in cmd.keys():
+            logger.debug("invalid cmd")
+            callback.on_msg_send_error(UtransError.INVALID_CMD, task_info)
+            return False
+        if cmd["status"] != "ok":
+            logger.debug("peer responsed failed")
+            callback.on_msg_send_error(UtransError.PEER_SAY_FAILED, task_info)
+            return False
+        callback.on_msg_send_finished(UtransError.OK, task_info)
+        return True
+        
+    def request_file(self, filepath):
+        if self.ssk == None or self.mode != Utrans.M_NORMAL:
+            logger.debug("invalid operation for mode", self.mode)
+            return False
+        pass
+
+    def receive_file(self, cmd, callback:UtransCallback, task_info = None):
+        if task_info == None:
+            task_info = UtransTask()
+        
+        if "name" not in cmd.keys() or "size" not in cmd.keys():
+            logger.debug("invalid file send cmd")
+            callback.on_file_send_error(UtransError.INVALID_CMD, task_info)
+            return False
+        
+        try:
+            filename = self.base64_decode_str(cmd["name"])
+            filesize = int(cmd["size"])
+        except Exception as e:
+            print(e)
+            callback.on_file_send_error(UtransError.INVALID_CMD, task_info)
+            return False
+        
+        if callback.on_need_decision("Receive file[%s %s]?"%(filename, filesize)) == False:
+            packed_cmd = self.cmd_mngr.pack_reject_reply()
+            try:
+                self.ssk.send(packed_cmd)
+            except Exception as e:
+                callback.on_file_send_error(UtransError.CONNECTION_ERROR, task_info)
+                return False
+            callback.on_file_send_error(UtransError.USER_REJECT, task_info)
+            return False
+
+        # start to receive file callback
+        callback.on_file_receive_start(filename, filesize, task_info)
+        packed_cmd = self.cmd_mngr.pack_accept_reply()
+        try:
+            self.ssk.send(packed_cmd)
+        except Exception as e:
+            print(e)
+            callback.on_file_send_error(UtransError.CONNECTION_ERROR, task_info)
+
+        # todo: There may be a file with the same name, so check it.
+        self.ssk.settimeout(5)
+        left_size = filesize
+        split_size = 0
+        with open(filename + ".downloading", "wb") as f:
+            # todo: change this to be configurable in config
+            while True:
+                try:
+                    data = self.ssk.recv(Utrans.SPLIT_LEN)
+                except Exception as e:
+                    print(e)
+                    callback.on_file_send_error(UtransError.CONNECTION_ERROR, task_info)
+                    break
+                split_size = len(data)
+                if split_size == 0:
+                    logger.log("peer close connection")
+                    callback.on_file_send_error(UtransError.CONNECTION_ERROR, task_info)
+                    return False
+                if left_size >= split_size:
+                    left_size -= split_size
+                else:
+                    split_size = left_size
+                    left_size = 0
+                try:
+                    f.write(data[0:split_size])
+                except Exception as e:
+                    print(e)
+                    callback.on_file_send_error(UtransError.LOCAL_ERROR,task_info)
+                    return False
+                progress = (filesize - left_size) / filesize
+                # on pregress callback
+                callback.on_file_sending(progress, task_info)
+                if left_size == 0:
+                    break
+        self.ssk.settimeout(None)
+        if left_size > 0:
+            logger.debug("data not complete")
+            packed_cmd = self.cmd_mngr.pack_failed_reply()
+            try:
+                self.ssk.send(packed_cmd)
+            except Exception as e:
+                print(e)
+                callback.on_file_send_error(UtransError.CONNECTION_ERROR, task_info)
+            return False
+        
+        packed_cmd = self.cmd_mngr.pack_ok_reply()
+        try:
+            self.ssk.send(packed_cmd)
+        except Exception as e:
+            print(e)
+            callback.on_file_send_error(UtransError.CONNECTION_ERROR, task_info)
+            return False
+        org_filename = filename
+        for i in range(1000):
+            if not os.path.exists(filename):
+                break
+            filename = str(i) + org_filename
+        
+        if os.path.exists(filename):
+            print("two many files with the same name")
+            callback.on_file_send_error(UtransError.REPEAT_FILE, task_info)
+            return False
+
+        os.rename(org_filename + ".downloading", filename)
+        callback.on_file_send_finished(UtransError.OK, task_info)
+        return True
+
+    def receive_message(self, cmd, callback:UtransCallback, task_info = None):
+        if "size" not in cmd.keys():
+            if "content" not in cmd.keys():
+                logger.debug("No content in message")
+                return None
+            msg = cmd["content"]
+            if "encode" in cmd.keys() and cmd["encode"] == "base64":
+                msg = self.base64_decode_str(msg)
+        else:
+            try:
+                msg_size = int(cmd["size"])
+            except:
+                logger.debug("size is not int")
+                return None
+
+            left_size = msg_size
+            if msg_size > 4*1024*10:
+                packed_cmd = self.cmd_mngr.pack_reject_reply()
+                self.ssk.send(packed_cmd)
+                return None
+
+            msg = b''
+            packed_cmd = self.cmd_mngr.pack_accept_reply()
+            self.ssk.send(packed_cmd)
+
+            # todo: change this to be configurable in config
+            # self.ssk.settimeout(5)
+            while left_size > 0:
+                try:
+                    data = self.ssk.recv(4096)
+                except:
+                    logger.debug("msg receive error")
+                    break
+                split_size = len(data)
+                if split_size == 0:
+                    break
+                if left_size >= split_size:
+                    left_size -= split_size
+                else:
+                    split_size = left_size
+                    left_size = 0
+                msg += data[0:split_size]
+            if left_size > 0:
+                if split_size == 0:
+                    logger.debug("peer close connection")
+                else:
+                    logger.debug("data not complete")
+                    packed_cmd = self.cmd_mngr.pack_failed_reply()
+                    self.ssk.send(packed_cmd)
+                return False
+            msg = msg.decode(encoding="utf8")
+        # success to receive message
+        packed_cmd = self.cmd_mngr.pack_ok_reply()
+        try:
+            self.ssk.send(packed_cmd)
+        except Exception as e:
+            print(e)
+        
+        callback.on_msg_receive(msg, task_info)
+        return True
+
 
 class Utrans:
     DATA_REV_TIMEOUT = 5
@@ -662,17 +1103,23 @@ class Utrans:
     
 class UtransServer:
 
-    def __init__(self):
-        self.name = "server"
+    def __init__(self, port = Utrans.DEFAULT_SERVICE_PORT):
+        self.name = socket.gethostname()
         self.running = False
+        self.port = port
+        self.lsk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.scan_responder = UtransScanResponder(self.name, self.port)
+        logger.debug("server port: %d"%(port))
+        # deprecated, will be remove soon
         self.enable_broadcast = True
         self.broadcast_interval = 2
-        self.lsk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     def init(self):
         logger.debug("server start to listen")
-        self.lsk.bind(('0.0.0.0', Utrans.DEFAULT_SERVICE_PORT))
+        self.lsk.bind(('0.0.0.0', self.port))
         self.lsk.listen(2)
+        self.scan_responder.asyn_start()
+        # deprecated, will be removed
         self.broadcast_service()
     
     def handle_client(self, ssk:socket.socket, addr):
@@ -733,9 +1180,11 @@ class UtransServer:
                 print("unknown operation: %s"%(cmd["cmd"]))
     
     # open a new thread to broadcast
+    @deprecatedBy(UtransScanResponder)
     def broadcast_service(self):
         _thread.start_new_thread(self.do_broadcast, ())
 
+    @deprecatedBy(UtransScanResponder)
     def do_broadcast(self):
         logger.debug("start broadcasting service")
         self.enable_broadcast = True
@@ -765,9 +1214,13 @@ class UtransServer:
             self.running = False
             self.lsk.close()
 
+    @deprecated
     def stop_broadcast(self):
         self.enable_broadcast = False
     
+    def stop_scan_service(self):
+        self.scan_responder.stop()
+
     def stop_server(self):
         if self.running == True:
             self.lsk.close()
@@ -776,12 +1229,11 @@ class UtransServer:
     def async_run(self, callback):
         _thread.start_new_thread(self.run, (callback,))
 
-
 class UtransClient:
     def __init__(self, id = "client"):
         self.id = id
         self.current_session = None
-        self.scanner = Utrans(Utrans.M_SCAN)
+        self.scanner = UtransScanner()
     
     def set_current_session(self, session):
         self.current_session = session
@@ -789,11 +1241,14 @@ class UtransClient:
     def get_current_session(self):
         return self.current_session
     
+    def set_scan_port(self, port:int):
+        self.scanner.set_scan_port(port)
+
     def start_scan(self, callback, time = 0):
-        self.scanner.start_scan_service(callback, time)
+        self.scanner.start_scan(callback, time)
 
     def stop_scan(self):
-        self.scanner.stop_scan_service()
+        self.scanner.stop_scan()
 
     def connect(self, server:UtransServerInfo, callback):
         sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

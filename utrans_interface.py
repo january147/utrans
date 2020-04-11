@@ -3,7 +3,6 @@
 # Date: Wed Mar 11 17:42:22 2020
 # Author: January
 class UtransError:
-
     CONNECTION_ERROR = "connetion_error"
     LOCAL_ERROR = "local error"
     INVALID_CMD = "invalid_cmd"
@@ -18,25 +17,22 @@ class UtransError:
 
 class UtransCallback:
 
-    def __init__(self):
-        pass
-    
     # file send
-    def on_file_send_start(self, filename, filesz, uuid):
+    def on_file_send_start(self, filename, filesz, task_info):
         pass
 
     # Note: The server has to create UI item when starting to transmit files whereas the client finish those task before call send file.
     # So I seperate this callback from file_send
-    def on_file_receive_start(self, filename, filesz, taskinfo):
+    def on_file_receive_start(self, filename, filesz, task_info):
         pass
 
-    def on_file_send_error(self, error, uuid):
+    def on_file_send_error(self, error, task_info):
         pass
 
-    def on_file_sending(self, progress, uuid):
+    def on_file_sending(self, progress, task_info):
         pass
 
-    def on_file_send_finished(self, state, uuid):
+    def on_file_send_finished(self, state, task_info):
         pass
     
     # message
@@ -53,8 +49,9 @@ class UtransCallback:
         pass
 
     # connection
+    # The method should return an session index
     def on_new_session(self, session):
-        return -1
+        return None
     
     def on_session_close(self, session_index):
         pass
@@ -63,8 +60,9 @@ class UtransCallback:
         pass
 
     # ask for user's confirmation
+    # This method should return True or False.
     def on_need_decision(self, info):
-        pass
+        return False
 
     # scan server
     def on_new_server(self, server_info):

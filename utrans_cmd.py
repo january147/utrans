@@ -14,8 +14,10 @@ data_channel_mngr = DataChannelManager()
 class UtransCmdMode(UtransCallback):
     def __init__(self):
         self.name = "cmd"
+        self.read_args()
         self.client = UtransClient()
-        self.server = UtransServer()
+        self.client.set_scan_port(self.scan_port)
+        self.server = UtransServer(self.port)
         self.server.async_run(callback = self)
         self.init_cmd_mode()
         self.init_callback()
@@ -56,10 +58,10 @@ class UtransCmdMode(UtransCallback):
     
     # connection
     def on_new_session(self, session:UtransSession):
-        self.sessions[session.token] = session
-        self.current_session_index = session.token
-        print("connect to client", str(session))
-        return session.token
+        index = self.sessions.append(session)
+        self.current_session_index = index
+        print("connect to", str(session))
+        return index
     
     def on_session_close(self, session_token):
         session = self.sessions.pop(session_token)
@@ -92,60 +94,42 @@ class UtransCmdMode(UtransCallback):
     def on_start_scan(self):
         self.available_servers = []
 
+    def read_args(self):
+        self.port = UtransDefault.SERVICE_PORT
+        self.scan_port = UtransDefault.SCAN_PORT
+        try:
+            raw_args, options = get_options(sys.argv, ['port:', 'scan_port:'])
+        except:
+            print(e)
+        if 'port' in options.keys():
+            self.port = int(options['port'])
+        if 'scan_port' in options.keys():
+            self.scan_port = int(options['scan_port'])
+        logger.debug("service port is %d, scan port is %d"%(self.port, self.scan_port))
+
     def init_cmd_mode(self):
         self.event_channel = queue.Queue()
         data_channel_mngr.register_data_channel(self.name, self.event_channel)
         self.finished = False
         self.available_servers = []
-        self.sessions = {}
+        self.sessions = DictList()
         self.current_session_index = -1
         self.find_new_server = False
         
     def exit_cmd_mode(self):
         self.server.stop_server()
-    
-    def get_session_by_index(self, session_index):
-        if session_index in self.sessions.keys():
-            return self.sessions[session_index]
-        else:
-            return None
-    
-    def get_session_by_name(self, name):
-        result = []
-        for key in self.sessions.keys():
-            session = self.sessions[key]
-            if session.name == name:
-                result.append(session)
-        return result
-    
-    def get_session_by_name_interactive(self, name):
-        sessions = self.get_session_by_name(name)
-        if len(sessions) <= 0:
-            return None
-        if len(sessions) > 1:
-            print("More than one session with host [%s], please specify one"%(name))
-            for i in range(len(sessions)):
-                print("%d %s %s %s"%(i, name, sessions[i].addr, sessions[i].token))
-            try:
-                choice = int(input())
-            except:
-                print("invalid input")
-                return None
-            if choice >=0 and choice < len(sessions):
-                return sessions[choice]
-            else:
-                print("invalid input")
-                return None
-        else:
-            return sessions[0]
         
-
     def run(self):
         input_trans_channel = data_channel_mngr.get_data_channel("prompt")
         client = self.client
         while True:
             try:
-                raw_data = input("%s@%s: "%(self.name, str(client.current_session)))
+                if self.current_session_index in self.sessions.keys():
+                    session = self.sessions[self.current_session_index]
+                    prompt = "%s@%s(%d): "%(self.name, session.name, self.current_session_index)
+                else:
+                    prompt = "%s@None: "%(self.name)
+                raw_data = input(prompt)
             except BaseException as e:
                 if type(e) != KeyboardInterrupt:
                     print(e)
@@ -195,9 +179,9 @@ class UtransCmdMode(UtransCallback):
                         current_session_info = "None"
                     print("current connect to [%s]"%(current_session_info))
                     print("All sessions:")
-                    print(self.sessions)
+                    self.sessions.show()
                     print("Avaliable servers: ")
-                    print(self.available_servers)
+                    print_list(self.available_servers)
             elif cmd == "connect":
                 if len(raw_args) <= 0:
                     available_server_num = len(self.available_servers)
@@ -218,39 +202,48 @@ class UtransCmdMode(UtransCallback):
                     except:
                         server_info = None
                     if server_info == None:
-                        addr_pattern = re.compile(r'((?:[0-9]+\.){3}[0-9]+)@([0-9]+)')
+                        addr_pattern = re.compile(r'((?:[0-9]+\.){3}[0-9]+):([0-9]+)')
                         result = addr_pattern.match(item)
                         if result == None:
                             print("not valid address: %s"%(item))
                             continue
                         else:
-                            addr = result.groups()[0]
-                            if len(addr) != 2:
+                            addr_raw = result.groups()
+                            try:
+                                addr = (addr_raw[0], int(addr_raw[1]))
+                            except:
                                 print("not valid address: %s"%(item))
                                 continue
-                            addr[1] = int(addr[1])
                         server_info = UtransServerInfo(item, addr)
                     client.connect(server_info, self)
             elif cmd == "switch":
                 if len(raw_args) <= 0:
                     print("please specify a session")
                     continue
-                name = raw_args[0]
-                session = self.get_session_by_name_interactive()
-                if session == None:
-                    print("No session with host named [%s]"%(name))
+                try:
+                    index = int(raw_args[0])
+                except:
+                    print("Not a valid session_index, please use 'ls' to check active sessions")
+                if index not in self.sessions.keys():
+                    print("Not a valid session_index, please use 'ls' to check active sessions")
                 else:
-                    self.current_session_index = session.token
+                    self.current_session_index = index
+
+                
             elif cmd == "close":
                 if len(raw_args) <= 0:
                     print("please specify a session")
                     continue
-                name = raw_args[0]
-                session = self.get_session_by_name_interactive(name)
-                if session == None:
-                    print("No session with host named [%s]"%(name))
+                try:
+                    index = int(raw_args[0])
+                except:
+                    print("Not a valid session_index, please use 'ls' to check active sessions")
+                if index not in self.sessions.keys():
+                    print("Not a valid session_index, please use 'ls' to check active sessions")
                 else:
-                    session.close()                
+                    session = self.sessions.pop(index)
+                    session.close()
+                            
             elif cmd == "scan":
                 self.scan_server(True)
             elif cmd == "stop":
@@ -268,7 +261,7 @@ class UtransCmdMode(UtransCallback):
                         if not self.server.enable_broadcast:
                             self.server.broadcast_service()
             elif cmd == "test":
-                client.async_test(self.callback)
+                Runnable(self.run, ())
             elif cmd == "q":
                 self.exit_cmd_mode()
                 return
