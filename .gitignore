@@ -1,2 +1,8 @@
 *.exe
 __pycache__
+keys/*
+*.pem
+*.der
+*.x509
+*.rsa
+

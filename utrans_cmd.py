@@ -5,9 +5,11 @@
 
 from utrans_utils import *
 from utrans_interface import *
-from utrans import *
+from utrans_new import *
 import progressbar
 import sys
+from crypto import openssl as crypto
+import hashlib
 
 data_channel_mngr = DataChannelManager()
 
@@ -18,6 +20,20 @@ class UtransCmdMode(UtransCallback):
         self.client = UtransClient()
         self.client.set_scan_port(self.scan_port)
         self.server = UtransServer(self.port)
+
+        ############testing#################
+        with open("key_pub.rsa", "rb") as f:
+            data = f.read()
+        sha256 = hashlib.sha256()
+        sha256.update(data)
+        uuid = sha256.hexdigest()
+        name = socket.gethostname()
+        self.server.set_name(name)
+        self.client.set_name(name)
+        self.server.set_uuid(uuid)
+        self.client.set_uuid(uuid)
+        self.auth = UtransAuth("./key_pub.rsa", "./key.rsa", "./keys")
+        ####################################
         self.server.async_run(callback = self)
         self.init_cmd_mode()
         self.init_callback()
@@ -39,7 +55,9 @@ class UtransCmdMode(UtransCallback):
 
     def on_file_send_error(self, error, task_info):
         print(error)
-
+        if error == UtransError.CONNECTION_ERROR:
+            self.on_session_close_send(task_info.session_index)
+    
     def on_file_sending(self, progress, uuid):
         self.pb.update(progress)
 
@@ -50,22 +68,103 @@ class UtransCmdMode(UtransCallback):
         session_index = task_info.session_index
         if session_index in self.sessions.keys():
             session = self.sessions[session_index]
-            notice = "%s@%s@%s"%(session.name, session.address, session.token)
+            notice = "%s@%s[%s]"%(session.peer_name, session.peer_addr, session.id)
         else:
             notice = None
         print("Message from %s"%(notice))
         print(message)
     
-    # connection
-    def on_new_session(self, session:UtransSession):
-        index = self.sessions.append(session)
-        self.current_session_index = index
-        print("connect to", str(session))
-        return index
+    def on_msg_send_error(self, error, task_info):
+        print("[msg send failed]", error)
+        if error == UtransError.CONNECTION_ERROR:
+            self.on_session_close_send(task_info.session_index)
+    # auth
+    def on_solve_challenge(self, challenge_type, challenge_data, session):
+        if challenge_type == UtransAuth.CLG_BASIC:
+            session_key, clg_reply_data, auth_counter = self.auth.basic_clg_solve(challenge_data)
+            session.sync_auth_counter(auth_counter)
+            result = (session_key, clg_reply_data)
+        else:
+            raise Exception("not support challenge type: %s"%(challenge_type))
+        return result
+
+    # auth_server
+    def on_normal_auth(self, auth_type, peer_auth_data, session:UtransSessionNew):
+        if auth_type == UtransAuth.AUTH_BASIC:
+           result = self.auth.mac_verify(session.get_auth_counter(), session.session_key, peer_auth_data)
+        else:
+            raise Exception("not support auth type: %s"%(auth_type))
+        return result
+    # return (challenge_data, verify_aux_data)
+    def on_challenge_peer(self, session:UtransSessionNew):
+        clg_type = UtransAuth.CLG_BASIC
+        clg_data = self.auth.basic_clg(session.peer_uuid, session.session_key, session.look_auth_counter())
+        result = (clg_type, clg_data)
+        return result
     
-    def on_session_close(self, session_token):
-        session = self.sessions.pop(session_token)
-        session.close()
+    # return (auth_data, aux_data)
+    def on_need_auth_data(self, session):
+        auth_type = UtransAuth.AUTH_BASIC
+        auth_data = self.auth.mac(session.session_key, session.get_auth_counter())
+        return (auth_type, auth_data)
+    
+    def on_verify_challenge(self, clg_type, reply_data, session):
+        if clg_type == UtransAuth.CLG_BASIC:
+            result = self.auth.basic_clg_verify(reply_data, session.get_auth_counter(), session.session_key)
+        else:
+            raise Exception("Not support challenge type:%s"%(clg_type))
+        return result
+        
+
+    def on_check_client_pubkey(self, peer_uuid):
+        return self.auth.check_peer_pubkey(peer_uuid)
+    
+    def on_search_session(self, peer_uuid):
+        return self.sessions.search(peer_uuid, lambda x,y: x.peer_uuid == y)
+
+    
+    def on_register_pubkey(self, peer_uuid, pubkey):
+        with open("./keys/%s"%(peer_uuid), "wb") as f:
+            f.write(pubkey)
+        return True
+    
+    def on_need_session_key(self, len):
+        return crypto.rand_bytes(len)
+    
+    def on_need_pubkey(self):
+        rsa = crypto.RSA()
+        rsa.load_pub_key("key_pub.rsa")
+        return rsa.read_pub_key()
+    # connection
+    def on_new_session(self, session:UtransSessionNew):
+        if session.id in self.sessions.keys():
+            print("reconnect to", str(session))
+            return session.id
+        else:
+            index = self.sessions.append(session)
+            session.id = index
+            self.current_session_index = index
+            print("connect to", str(session))
+            return index
+    
+    def on_session_close_send(self, session_index):
+        if session_index in self.sessions.keys():
+            session = self.sessions[session_index]
+            session.close_send_sk()
+            if session.status == UtransSession.DISCONNECTED:
+                self.on_session_close(session_index)
+    
+    def on_session_close_recv(self, session_index):
+        if session_index in self.sessions.keys():
+            session = self.sessions[session_index]
+            session.close_recv_sk()
+            if session.status == UtransSession.DISCONNECTED:
+                self.on_session_close(session_index)
+    
+    def on_session_close(self, session_index):
+        if session_index in self.sessions.keys():
+            session = self.sessions.pop(session_index)
+            session.close()
 
     def on_connect_error(self, error):
         print("can not connect")
@@ -83,6 +182,9 @@ class UtransCmdMode(UtransCallback):
     #     else:
     #         return False
 
+    def on_need_decision(self, info):
+        return True
+    
     # scan server
     def on_new_server(self, server_info):
         self.available_servers.append(server_info)
@@ -126,7 +228,7 @@ class UtransCmdMode(UtransCallback):
             try:
                 if self.current_session_index in self.sessions.keys():
                     session = self.sessions[self.current_session_index]
-                    prompt = "%s@%s(%d): "%(self.name, session.name, self.current_session_index)
+                    prompt = "%s@%s(%d): "%(self.name, session.peer_name, self.current_session_index)
                 else:
                     prompt = "%s@None: "%(self.name)
                 raw_data = input(prompt)
@@ -170,7 +272,8 @@ class UtransCmdMode(UtransCallback):
                         print("exit message send mode")
                 else:
                     msg = " ".join(raw_args)
-                    client.send_message(msg, self)
+                    task_info = UtransTaskInfo(session_index = self.current_session_index)
+                    client.send_message(msg, self, task_info)
             elif cmd == "ls":
                 if len(raw_args) <= 0:
                     if self.current_session_index in self.sessions.keys():
@@ -215,7 +318,7 @@ class UtransCmdMode(UtransCallback):
                                 print("not valid address: %s"%(item))
                                 continue
                         server_info = UtransServerInfo(item, addr)
-                    client.connect(server_info, self)
+                    client.connect(self, server_info)
             elif cmd == "switch":
                 if len(raw_args) <= 0:
                     print("please specify a session")
@@ -228,6 +331,7 @@ class UtransCmdMode(UtransCallback):
                     print("Not a valid session_index, please use 'ls' to check active sessions")
                 else:
                     self.current_session_index = index
+                    client.set_current_session(self.sessions[self.current_session_index])
 
                 
             elif cmd == "close":
@@ -260,6 +364,17 @@ class UtransCmdMode(UtransCallback):
                     elif raw_args[0] == "broadcast":
                         if not self.server.enable_broadcast:
                             self.server.broadcast_service()
+            elif cmd == "show_session_info":
+                if len(raw_args) > 0:
+                    try:
+                        index = int(raw_args[0])
+                    except:
+                        print("No such session")
+                        continue
+                    if index not in self.sessions.keys():
+                        print("No such session")
+                        continue
+                    self.sessions[index].print_info()
             elif cmd == "test":
                 Runnable(self.run, ())
             elif cmd == "q":

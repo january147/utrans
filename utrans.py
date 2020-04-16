@@ -5,6 +5,9 @@
 
 from utrans_utils import *
 from utrans_interface import *
+from crypto import openssl as crypto
+import hashlib
+import hmac
 import os
 import socket
 import sys
@@ -15,9 +18,10 @@ import time
 import re
 import base64
 import queue
+import traceback
 
 
-#logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("utrans")
 
 usage='''
@@ -35,6 +39,18 @@ class CommandManager:
     F_START = ord('^')
     F_END = ord('$')
     MSG_MAX = 100
+
+    MSG_TYPE = {
+        "send_file" : ("type", "msg_type", "filename", "filesize", "encode"),
+        "send_message" : ("type", "msg_type", "msg_size", "encode", "content"),
+        "common_reply" : ("type", "msg_type", "status", "info"),
+        "auth_init" : ("type", "msg_type", "name", "uuid", "fast_auth", "auth_data"),
+        "auth_finish" : ("type", "msg_type", "name", "uuid", "auth_data"),
+        "auth_ask_pubkey" : ("type", "msg_type"),
+        "auth_ask_pubkey_reply" : ("type", "msg_type", "key_type", "pubkey", "status"),
+        "auth_challenge" : ("type", "msg_type", "challenge_type", "data"),
+        "auth_challenge_reply" : ("type", "msg_type", "data", "status")
+    }
 
     def __init__(self):
         self.reset()
@@ -73,8 +89,8 @@ class CommandManager:
         while True:
             try:
                 data = ssk.recv(4096)
-            except Exception as e:
-                print(e)
+            except:
+                traceback.print_exc()
                 data = b''
             if self.parse_cmd_from_bytes(data) is True:
                 return self.status
@@ -188,21 +204,130 @@ class CommandManager:
         cmd["status"] = "reject"
         return CommandManager.pack_cmd(cmd)
     
+
     @staticmethod
-    def pack_init_msg(name, extra_data:dict = None):
+    def pack_auth_init(name, uuid, fast_auth = False, auth_data = None, server_addr:str = None):
+        cmd = dict()
+        cmd["type"] = "ask"
+        cmd["cmd"] = "init"
+        cmd["name"] = name
+        cmd["uuid"] = uuid
+        cmd["status"] = "auth_start"
+        if fast_auth == True:
+            cmd["fast_auth"] = "true"
+        else:
+            cmd["fast_auth"] = "false"
+        cmd["auth_data"] = auth_data
+        cmd["server_addr"] = server_addr
+
+        return CommandManager.pack_cmd(cmd)
+    
+    @staticmethod
+    def pack_auth_finish(status, name = None, uuid = None, auth_data = None):
+        cmd = dict()
+        cmd["type"] = "ask"
+        cmd["cmd"] = "finish"
+        cmd["name"] = name
+        cmd["uuid"] = uuid
+        cmd["status"] = status
+        cmd["auth_data"] = auth_data
+
+        return CommandManager.pack_cmd(cmd)
+    
+    @staticmethod
+    def pack_auth_ask_pubkey():
+        cmd = dict()
+        cmd["type"] = "ask"
+        cmd["cmd"] = "ask_pubkey"
+        cmd["status"] = "auth_ing"
+        return CommandManager.pack_cmd(cmd)
+    
+    @staticmethod
+    def pack_auth_pubkey_reply(pubkey):
+        cmd = dict()
+        cmd["type"] = "res"
+        cmd["cmd"] = "reg_pubkey"
+        cmd["pubkey"] = pubkey
+        cmd["status"] = "auth_ing"
+        return CommandManager.pack_cmd(cmd)
+    
+    @staticmethod
+    def pack_auth_challenge(challenge_msg):
+        cmd = dict()
+        cmd["type"] = "ask"
+        cmd["cmd"] = "challenge"
+        cmd["data"] = challenge_msg
+        cmd["status"] = "auth_ing"
+        return CommandManager.pack_cmd(cmd)
+    
+    @staticmethod
+    def pack_auth_challenge_reply(reply_data):
+        cmd = dict()
+        cmd["type"] = "res"
+        cmd["cmd"] = "challenge_reply"
+        cmd["data"] = reply_data
+        cmd["status"] = "auth_ing"
+        return CommandManager.pack_cmd(cmd)
+
+    @staticmethod
+    def pack_init_msg(name, uuid = None, extra_data:dict = None):
         if extra_data != None:
             cmd = extra_data
         else:
             cmd = dict()
         cmd["type"] = "init"
         cmd["name"] = name
+        if uuid == None:
+            cmd["uuid" ] = name
+        else:
+            cmd["uuid"] = uuid
         return CommandManager.pack_cmd(cmd)
+    
+    ##### message type #####
+    # message type                  ask/res                 description
+    # send_file                     ask                     
+    # send_message                  ask                     
+    # common_reply                  res                     ok, failed, reject, accept
+    # auth_init                     ask                     
+    # auth_finish                   res                     
+    # auth_challenge                ask                     
+    # auth_challange_reply          res                     
+    # auth_ask_pubkey               ask                     
+    # auth_ask_pubkey_reply         res
+    # scan_request                  ask
+    # scan_response                 res                    
 
+    ##### message field #####
+    # only [res] type messages have the [status] field.
+    # send_file(type, msg_type, filename, filesize, encode)
+    # send_message(type, msg_type, msg_size, encode, content) --> for long message, set the content field to the value of msg_size field
+    # common_reply(type, msg_type, status, info)
+    # auth_init(type, msg_type, name, uuid, fast_auth, auth_data)
+    # auth_finish(type, msg_type, name, uuid, auth_data)
+    # auth_ask_pubkey(type, msg_type)
+    # auth_ask_pubkey_reply(type, msg_type, key_type, pubkey, status)
+    # auth_challenge(type, msg_type, challenge_type, data)
+    # auth_challenge_reply(type, msg_type, data, status)
+    # scan_request(type, msg_type)
+    # scan_response(type, msg_type, name, ip, port)
+
+    
+    @staticmethod
+    def check_msg(msg):
+        if "msg_type" not in msg.keys():
+            return False
+        msg_type = msg["msg_type"]
+        if msg_type not in CommandManager.MSG_TYPE.keys():
+            return False
+        fields = CommandManager.MSG_TYPE[msg_type]
+        for field in fields:
+            if field not in msg.keys():
+                return False
+        return True
+    
 class UtransDefault:
     SERVICE_PORT = 9999
     SCAN_PORT = 9999
-
-
 
 # seperate scanner from Utrans
 class UtransScanner:
@@ -321,16 +446,178 @@ class UtransCore:
     NETWORK_TIMEOUT = 3
     SPLIT_LEN = 409600
 
-    def __init__(self, sk = None):
-        self.ssk = sk
+    def __init__(self, sk:socket.socket = None):
         self.cmd_mngr = CommandManager()
+        self.set_socket(sk)
     
-    def set_socket(self, sk):
+    def set_socket(self, sk:socket.socket):
         self.ssk = sk
 
     def authenticate(self):
         self.send_not_support_info()
     
+    def authenticate_server(self, name, uuid, callback:UtransCallback):
+        sk = self.ssk
+        cmd_mngr = self.cmd_mngr
+        if cmd_mngr.parse_cmd_from_ssk(sk) == CommandManager.S_ABORT:
+            logger.debug("connection closed by peer")
+            return False
+        cmd = cmd_mngr.get()
+        if not self.check_cmd_key(("name", "uuid", "fast_auth", "auth_data"), cmd):
+            logging.debug("protocol error")
+            return None
+
+        peer_name = cmd["name"]
+        peer_uuid = cmd["uuid"]
+        peer_auth_data = cmd["auth_data"]
+
+        session = callback.on_search_session(peer_uuid)
+        if cmd["fast_auth"] == "true" and session != None:
+            session_key = session.session_key
+            auth_counter = session.get_auth_counter()
+            auth_counter_mac = hmac.new(session_key, auth_counter, digestmod="sha256").hexdigest()
+            if peer_auth_data != auth_counter_mac:
+                auth_result_msg = cmd_mngr.pack_auth_finish("failed")
+                sk.send(auth_result_msg)
+                return None
+        else:
+            if session == None:
+                session = UtransSessionNew(peer_name, peer_uuid)
+            has_pubkey = callback.on_check_client_pubkey(peer_uuid)
+            if not has_pubkey:
+                ask_pubkey_msg = cmd_mngr.pack_auth_ask_pubkey()
+                sk.send(ask_pubkey_msg)
+                if cmd_mngr.parse_cmd_from_ssk(sk) == CommandManager.S_ABORT:
+                    logger.debug("connection closed by peer")
+                    return None
+                cmd = cmd_mngr.get()
+                if not self.check_cmd_key(("status", "cmd", "pubkey"), cmd):
+                    logger.warning("protocol error")
+                    return None
+                if cmd["status"] != "auth_ing" or cmd["cmd"] != "reg_pubkey":
+                    return None
+                
+                pubkey = base64_decode(cmd["pubkey"])
+                ret = callback.on_register_pubkey(peer_uuid, pubkey)
+                if ret is False:
+                    auth_result_msg = cmd_mngr.pack_auth_finish("failed")
+                    sk.send(auth_result_msg)
+                    return None
+            session_key = callback.on_need_session_key(16)
+            encrypted_session_key = callback.on_encrypt_session_key(peer_uuid, session_key)
+            challenge_msg = cmd_mngr.pack_auth_challenge(base64_encode(encrypted_session_key))
+            sk.send(challenge_msg)
+            if cmd_mngr.parse_cmd_from_ssk(sk) == CommandManager.S_ABORT:
+                logger.debug("connection closed by peer")
+                return None
+            cmd = cmd_mngr.get()
+            if not self.check_cmd_key(("status", "cmd", "data"), cmd):
+                logger.warning("protocol error")
+                return None
+            if cmd["status"] != "auth_ing" or cmd["cmd"] != "challenge_reply":
+                logger.warning("protocol error")
+                return None
+            auth_data = cmd["data"]
+            peer_uuid_mac = hmac.new(session_key, peer_uuid.encode("utf8"), digestmod="sha256").hexdigest()
+            if auth_data != peer_uuid_mac:
+                logger.warning("authentication failed")
+                return None
+            session.set_session_key(session_key)
+        session.set_recv_sk(sk)
+        auth_data = hmac.new(session_key, uuid.encode("utf8"), digestmod="sha256").hexdigest()    
+        auth_result_msg = cmd_mngr.pack_auth_finish("auth_ok", name, uuid, auth_data)
+        sk.send(auth_result_msg)
+        return session
+
+    
+    def authenticate_client(self, name, uuid, callback:UtransCallback, fast_auth_data = None):
+        sk = self.ssk
+        cmd_mngr = self.cmd_mngr
+
+        # For all bytes data, use base64 to encode it to str
+        if fast_auth_data == None:
+            init_msg = cmd_mngr.pack_auth_init(name, uuid)
+        else:
+            init_msg = cmd_mngr.pack_auth_init(name, uuid, True, fast_auth_data)
+        sk.send(init_msg)
+        if cmd_mngr.parse_cmd_from_ssk(sk) == CommandManager.S_ABORT:
+            logger.debug("connection closed by peer")
+            return None
+        cmd = cmd_mngr.get()
+
+        if "status" not in cmd.keys():
+            logging.warning("protocol error")
+            return None
+        
+        if cmd["status"] == "auth_ing":
+            if "cmd" not in cmd.keys():
+                logger.warning("protocol error")
+                return None
+            # registe public key
+            if cmd["cmd"] == "ask_pubkey":
+                pubkey = callback.on_need_pubkey()
+                pubkey_msg = cmd_mngr.pack_auth_pubkey_reply(base64_encode(pubkey))
+                sk.send(pubkey_msg)
+                if cmd_mngr.parse_cmd_from_ssk(sk) == CommandManager.S_ABORT:
+                    logger.debug("connection closed by peer")
+                    return None
+                cmd = cmd_mngr.get()
+                if "cmd" not in cmd.keys() or "status" not in cmd.keys():
+                    logger.warning("protocol error")
+                    return None
+                if cmd["status"] != "auth_ing":
+                    logger.warning("authentication abort")
+                    return None
+            # regular auth
+            if cmd["cmd"] == "challenge":
+                encrypted_session_key = cmd["data"]
+                encrypted_session_key = base64_decode(encrypted_session_key)
+                session_key = callback.on_decrypt_session_key(encrypted_session_key)
+                mac = hmac.new(session_key, uuid.encode("utf8"), digestmod="sha256")
+                hmac_data = mac.hexdigest()
+
+                challenge_reply = cmd_mngr.pack_auth_challenge_reply(hmac_data)
+                sk.send(challenge_reply)
+            else:
+                logger.warn("protocol error")
+            
+            if cmd_mngr.parse_cmd_from_ssk(sk) == CommandManager.S_ABORT:
+                logger.debug("connection closed by peer")
+                return None
+            cmd = cmd_mngr.get()
+
+        if not self.check_cmd_key(("status", "name", "uuid", "auth_data"), cmd):
+            logger.debug("protocol error")
+            return None
+        
+        if cmd["status"] != "auth_ok":
+            logger.debug("authentication failed")
+            return None
+        
+        peer_name = cmd["name"]
+        peer_auth_data = cmd["auth_data"]
+        peer_uuid = cmd["uuid"]
+        peer_uuid_mac = hmac.new(session_key, peer_uuid.encode("utf8"), digestmod="sha256").hexdigest()
+        if peer_auth_data != peer_uuid_mac:
+            logger.debug("Server's authentication data Invalid")
+            return None
+        session = callback.on_search_session(uuid)
+        if session == None:
+            session = UtransSessionNew(peer_name, peer_uuid, session_key = session_key)
+        else:
+            session.peer_name = peer_name
+            session.sesion_key = session_key
+        session.set_send_sk(sk)
+        return session
+            
+
+    def check_cmd_key(self, keys, cmd):
+        for key in keys:
+            if key not in cmd.keys():
+                return False
+        return True
+
+
     def send_not_support_info(self):
         info = {
             "info" : "unsupported operation"
@@ -338,7 +625,8 @@ class UtransCore:
         packed_msg = self.cmd_mngr.pack_failed_reply(info)
         self.ssk.send(packed_msg)
 
-    def send_file(self, filepath, task_info:UtransTask, callback:UtransCallback):
+    # The "task_info" is used to discriminate and control(i.e. to stop) every asynchronous call to "send_file" in callback function
+    def send_file(self, filepath, task_info:UtransTaskInfo, callback:UtransCallback):
         # read filename and file size
         # make sure the file exists in high level APIs of UtransClient
         ssk = self.ssk
@@ -346,32 +634,31 @@ class UtransCore:
         filesize = os.path.getsize(filepath)
         filename = os.path.basename(filepath)
         
-        # new start callback
+        # file send start callback
         callback.on_file_send_start(filename, filesize, task_info)
         
-        # send control info
+        # send file-send request
         filename = self.base64_encode_str(filename)
         packed_cmd = CommandManager.pack_send_file_cmd(filename, filesize)
         try:
             ssk.send(packed_cmd)
         except Exception as e:
             logger.debug(e)
-            callback.on_file_send_error(UtransError.CONNECTION_ERROR, task_info)
+            callback.on_file_send_finished(UtransError.CONNECTION_ERROR, task_info)
         
         # get reply
-        self.ssk.settimeout(15)
         if cmd_mngr.parse_cmd_from_ssk(ssk) == CommandManager.S_ABORT:
             logger.debug("connection closed by peer")
-            callback.on_file_send_error(UtransError.CONNECTION_ERROR, task_info)
+            callback.on_file_send_finished(UtransError.CONNECTION_ERROR, task_info)
             return False
         cmd = cmd_mngr.get()
         if "status" not in cmd.keys():
-            callback.on_file_send_error(UtransError.INVALID_CMD, task_info)
+            callback.on_file_send_finished(UtransError.PROTOCAL_ERROR, task_info)
             return False
 
         if cmd["status"] != "accept":
             logger.debug("peer reject")
-            callback.on_file_send_error(UtransError.PEER_REJECT, task_info)
+            callback.on_file_send_finished(UtransError.PEER_REJECT, task_info)
             return False
 
         # start sending file
@@ -382,21 +669,22 @@ class UtransCore:
                 try:
                     data = f.read(Utrans.SPLIT_LEN)
                 except Exception as e:
-                    print(e)
-                    callback.on_file_send_error(UtransError.LOCAL_ERROR, task_info)
+                    print("[send_file] fail to read file", e)
+                    callback.on_file_send_finished(UtransError.LOCAL_ERROR, task_info)
                 # finish read
                 if len(data) == 0:
                     break
                 try:
                     ssk.send(data)
                 except Exception as e:
-                    print(e)
-                    callback.on_file_send_error(UtransError.CONNECTION_ERROR, task_info)
+                    print("[send_file] fail to send data", e)
+                    callback.on_file_send_finished(UtransError.CONNECTION_ERROR, task_info)
                 sended += len(data)
                 # sending progress callback
                 progress = sended / filesize
                 # on progress callback
                 callback.on_file_sending(progress, task_info)
+                # stop sending file
                 if task_info.running == False:
                     callback.on_file_send_stop(task_info)
                     return False
@@ -404,12 +692,18 @@ class UtransCore:
         # get reply
         if cmd_mngr.parse_cmd_from_ssk(ssk) == CommandManager.S_ABORT:
             logger.debug("connection closed by peer")
-            callback.on_file_send_error(UtransError.CONNECTION_ERROR, uuid)
+            callback.on_file_send_finished(UtransError.CONNECTION_ERROR, uuid)
             return False
         cmd = cmd_mngr.get()
+
+        if "status" not in cmd:
+            logger.debug("ProtocalError: No status in reponse")
+            callback.on_file_send_finished(UtransError.PROTOCAL_ERROR, task_info)
+            return False
+        
         if cmd["status"] != "ok":
             logger.debug("peer responsed failed")
-            callback.on_file_send_error(UtransError.PEER_SAY_FAILED, task_info)
+            callback.on_file_send_finished(UtransError.PEER_SAY_FAILED, task_info)
             return False
         # success sending file
         callback.on_file_send_finished(UtransError.OK, task_info)
@@ -639,7 +933,6 @@ class UtransCore:
         
         callback.on_msg_receive(msg, task_info)
         return True
-
 
 class Utrans:
     DATA_REV_TIMEOUT = 5
@@ -1101,10 +1394,11 @@ class Utrans:
         packed_cmd = CommandManager.pack_init_msg(name)
         sk.send(packed_cmd)
     
-class UtransServer:
+class UtransServer():
 
     def __init__(self, port = Utrans.DEFAULT_SERVICE_PORT):
         self.name = socket.gethostname()
+        self.uuid = None
         self.running = False
         self.port = port
         self.lsk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1113,6 +1407,12 @@ class UtransServer:
         # deprecated, will be remove soon
         self.enable_broadcast = True
         self.broadcast_interval = 2
+
+    def set_name(self, name):
+        self.name = name
+
+    def set_uuid(self, uuid):
+        self.uuid = uuid
 
     def init(self):
         logger.debug("server start to listen")
@@ -1128,32 +1428,23 @@ class UtransServer:
         utrans.set_session(ssk)
         callback = self.callback
 
-        # get init info
-        if cmd_mngr.parse_cmd_from_ssk(ssk) == CommandManager.S_ABORT:
-            logger.debug("peer close connection")
-            return
-        cmd = cmd_mngr.get()
-        if "type" not in cmd.keys():
-            logger.debug("client send invalid init message")
-            ssk.close()
-            return
-        elif cmd["type"] != "init":
-            logger.debug("init message has invalid type")
-            ssk.close()
-            return 
-        
-        if "name" in cmd.keys():
-            client_name = cmd["name"]
+        ##################### New authentication ######################
+        ucore = UtransCore()
+        ucore.set_socket(ssk)
+        session = ucore.authenticate_server(self.name, self.uuid, self.callback)
+        if session == None:
+            print("fail to authenticate")
         else:
-            client_name = "%s@%s"%(addr[0], addr[1])
-        session = UtransSession(client_name, addr, ssk, UtransSession.T_RECV)
+            print("authenticate ok")
+            session.print_info()
+        ###############################################################
         session_index = callback.on_new_session(session)
 
         # ok, start handling requests
         while True:
             if cmd_mngr.parse_cmd_from_ssk(ssk) == CommandManager.S_ABORT:
                 logger.debug("peer close connection")
-                callback.on_session_close(session_index)
+                callback.on_session_close_recv(session_index)
                 break
             cmd = cmd_mngr.get()
             if cmd["type"] != "ask":
@@ -1231,9 +1522,16 @@ class UtransServer:
 
 class UtransClient:
     def __init__(self, id = "client"):
-        self.id = id
+        self.name = id
+        self.uuid = None
         self.current_session = None
         self.scanner = UtransScanner()
+    
+    def set_name(self, name):
+        self.name = name
+    
+    def set_uuid(self, uuid):
+        self.uuid = uuid
     
     def set_current_session(self, session):
         self.current_session = session
@@ -1251,25 +1549,32 @@ class UtransClient:
         self.scanner.stop_scan()
 
     def connect(self, server:UtransServerInfo, callback):
-        sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sk.settimeout(3)
+        ssk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        ssk.settimeout(3)
         logger.debug("connect")
         try:
-            sk.connect(server.addr)
+            ssk.connect(server.addr)
         except Exception as e:
             print(e)
             callback.on_connect_error(UtransError.CONNECTION_ERROR)
             return False
-        session = UtransSession(server.name, server.addr, sk)
-        # save the session
-        self.current_session = session
-        # new session
-        Utrans.send_init_message(sk, socket.gethostname())
+
+        ##################### New authentication ###########################
+        ucore = UtransCore()
+        ucore.set_socket(ssk)
+        session = ucore.authenticate_client(self.name, self.uuid, callback)
+        if session == None:
+            print("fail to authenticate")
+        else:
+            print("authenticate ok")
+            session.print_info()
+        ##########################################################
         callback.on_new_session(session)
+        self.current_session = session
         return True
 
-    def send_file(self, filename, callback, task_info:UtransTask = None, block = True, session:UtransSession = None):
-        if session is None:
+    def send_file(self, filename, callback, task_info:UtransTask = None, block = True, session:UtransSessionNew = None):
+        if session == None:
             session = self.current_session
         if task_info == None:
             task_info = UtransTask()
@@ -1277,7 +1582,7 @@ class UtransClient:
             callback.on_file_send_error(UtransError.NO_SUCH_FILE, task_info)
             return False
         utrans = Utrans(Utrans.M_NORMAL)
-        utrans.set_session(session.sk)
+        utrans.set_session(session.send_sk)
         if block:
             return utrans.send_file(filename, task_info, callback)
         else:
@@ -1285,9 +1590,8 @@ class UtransClient:
             return True
     
     def send_files(self, filenames, callback, task_infos = None, session:UtransSession = None):
-        if session is None:
+        if session == None:
             session = self.current_session
-        
         if task_infos == None:
             task_infos = (UtransTask() for i in range(len(filenames)))
         _thread.start_new_thread(self.__do_send_files, (filenames, callback, task_infos, session))
@@ -1297,11 +1601,11 @@ class UtransClient:
         for filename, task_info in zip(filenames, task_infos):
             self.send_file(filename, callback, task_info = task_info, block=True, session=session)
        
-    def send_message(self, msg, callback, task_info:UtransTask = None, block = False, session:UtransSession = None):
-        if session is None:
+    def send_message(self, msg, callback, task_info:UtransTask = None, block = False, session:UtransSessionNew = None):
+        if session == None:
             session = self.current_session
         utrans = Utrans(Utrans.M_NORMAL)
-        utrans.set_session(session.sk)
+        utrans.set_session(session.send_sk)
         if task_info == None:
             task_info = UtransTask()
         if block:

@@ -4,6 +4,8 @@
 # Author: January
 
 from queue import Queue
+from utrans_interface import *
+from crypto import openssl as crypto
 import threading
 import ctypes
 import time
@@ -12,6 +14,10 @@ import random
 import string
 import json
 from termcolor import colored
+import socket
+import base64
+import hmac
+import os
 
 #decorators
 def deprecatedBy(replace_func):
@@ -31,14 +37,63 @@ def deprecated(func):
     return wrapper
 
 
+def calculate_num_byte_size(num):
+    size = 1
+    num <<= 8
+    while num != 0:
+        num <<= 8
+        size += 1
+    return size
+#
+def pack_bytes(bytes_list):
+    packed_bytes = b""
+    for item in bytes_list:
+        item_len = len(item)
+        if item_len <= 128:
+            size_field = item_len.to_bytes(1, "little")
+        else:
+            len_bytes_size = calculate_num_byte_size(item_len)
+            len_byte = (128 + len_bytes_size).to_bytes(1, "little")
+            len_bytes = item_len.to_bytes(item_bytes_size, "little")
+            size_field = len_byte + len_bytes
+        packed_bytes = packed_bytes + size_field + item
+    return packed_bytes
+
+def unpack_bytes(packed_bytes):
+    bytes_list = []
+    p = 0
+    while p < len(packed_bytes):
+        field_len = packed_bytes[p]
+        p += 1
+        if field_len <= 128:
+            item_end = p + field_len
+            item = packed_bytes[p : item_end]
+        else:
+            len_bytes_size = field_len - 128
+            len_bytes = packed_bytes[p : p + len_bytes_size]
+            p += len_bytes_size
+            field_len = int.from_bytes(len_bytes, byteorder="little")
+            item_end = p + field_len
+            item = packed_bytes[p : item_end]
+        bytes_list.append(item)
+        p = item_end
+    return bytes_list
+        
+
 # utils function
 def random_str(str_len = 8):
     result_str = ''.join((random.choice(string.ascii_letters) for i in range(str_len)))
     return result_str
 
 def base64_encode_str(string:str):
-        return base64.b64encode(string.encode("utf8")).decode("utf8")
-    
+    return base64.b64encode(string.encode("utf8")).decode("utf8")
+
+def base64_encode(data:bytes):
+    return base64.b64encode(data).decode("utf8")
+
+def base64_decode(data:str):
+    return base64.b64decode(data.encode("utf8"))
+
 def base64_decode_str(string:str):
     return base64.b64decode(string.encode("utf8")).decode("utf8")
 
@@ -63,7 +118,7 @@ class LookUpList(list):
             comparer = lambda x,y : x == y
         self.comparer = comparer
     
-    def get_index(self, value, comparer = None):
+    def search_item_index(self, value, comparer = None):
         if comparer == None:
             comparer == self.comparer
         for i in range(len(self)):
@@ -71,7 +126,7 @@ class LookUpList(list):
                 return i
         return -1
     
-    def get_all_index(self, value, comparer):
+    def search_all_item_index(self, value, comparer):
         if comparer == None:
             comparer == self.comparer
         result = []
@@ -83,26 +138,35 @@ class LookUpList(list):
 class DictList(dict):
     def __init__(self):
         self.__index = 0
+        self.comparer = lambda x, y : x == y
     
-    def get_index(self):
+    def __get_index(self):
         index = self.__index
         self.__index += 1
         return index
+    
+    def set_comparer(self, comparer):
+        self.comparer = comparer
      
     def append(self, item):
-        index = self.get_index()
+        index = self.__get_index()
         self[index] = item
         return index
     
+    def search(self, value, comparer = None):
+        if comparer == None:
+            comparer == self.comparer
+        for i in self.keys():
+            if comparer(self[i], value) == True:
+                return self[i] 
+        return None
+
     def show(self):
         if len(self) == 0:
             print("No data")
         else:
             for i in self.keys():
                 print("[%d] %s"%(i, str(self[i])))
-
-
-
 
 class UtransConfig(dict):
 
@@ -145,6 +209,100 @@ class UtransTaskInfo:
     def stop(self):
         self.running = False
 
+class UtransSessionNew:
+    def __init__(self, name = None, uuid = None, peer_addr = None, session_key = None, send_sk = None, recv_sk = None):
+        self.peer_name = name
+        self.peer_uuid = uuid
+        self.session_key = session_key
+        self.peer_addr = peer_addr
+        self.send_sk = send_sk
+        self.recv_sk = recv_sk
+        self.id = -1
+        self.auth_counter = 1000000000000000
+        self.status = UtransSession.CONNECTED
+
+    def set_id(self, id):
+        self.id = id
+    
+    def set_name(self, peer_name):
+        self.peer_name = peer_name
+    
+    def set_uuid(self, peer_uuid):
+        self.peer_uuid = peer_uuid
+
+    def set_session_key(self, key):
+        self.session_key = key
+    
+    def set_peer_addr(self, addr):
+        self.peer_addr = addr
+    def set_send_sk(self, sk:socket.socket):
+        self.status = UtransSession.CONNECTED
+        self.send_sk = sk
+    
+    def set_recv_sk(self, sk:socket.socket):
+        self.status = UtransSession.CONNECTED
+        self.recv_sk = sk
+
+    def get_auth_counter(self):
+        auth_counter = "%s"%(self.auth_counter)
+        self.auth_counter += 1
+        return auth_counter.encode("utf8")
+
+    def look_auth_counter(self):
+        auth_counter = "%s"%(self.auth_counter)
+        return auth_counter.encode("utf8")
+
+    def sync_auth_counter(self, auth_counter):
+        auth_counter = int(auth_counter)
+        self.auth_counter = auth_counter + 1
+    
+    def get_session_key(self):
+        return self.session_key    
+
+    def is_recv_enabled(self):
+        if self.recv_sk != None:
+            return True
+        else:
+            return False
+    
+    def is_send_enabled(self):
+        if self.send_sk != None:
+            return True
+        else:
+            return False
+
+    def close_send_sk(self):
+        if self.send_sk != None:
+            self.send_sk.close()
+            self.send_sk = None
+            if self.recv_sk == None:
+                self.status = UtransSession.DISCONNECTED
+
+    def close_recv_sk(self):
+        if self.recv_sk != None:
+            self.recv_sk.close()
+            self.recv_sk = None
+            if self.send_sk == None:
+                self.status = UtransSession.DISCONNECTED
+
+    def close(self):
+        self.close_send_sk()
+        self.close_recv_sk()
+    
+    def print_info(self):
+        print("peer_name:", self.peer_name)
+        print("peer uuid:", self.peer_uuid)
+        print("session key:", self.session_key.hex())
+        print("peer addr:", self.peer_addr)
+        print("recv_sk:", self.recv_sk)
+        print("send_sk:", self.send_sk)
+    
+    def __str__(self):
+        return "%s"%(self.peer_name)
+    
+    def __repr__(self):
+        return "[%s]%s@%s"%(self.id, self.name, self.peer_addr)
+
 class UtransSession:
     CONNECTED = "connected"
     DISCONNECTED = "disconnected"
@@ -153,6 +311,8 @@ class UtransSession:
 
     def __init__(self, name, address, sk, session_type = None):
         self.name = name
+        # doesn't use
+        self.uuid = -1
         self.address = address
         self.sk = sk
         self.status = UtransSession.CONNECTED
@@ -160,7 +320,8 @@ class UtransSession:
             session_type = UtransSession.T_SEND
         self.type = session_type
         self.token = random_str(10)
-    
+
+
     def close(self):
         self.status = UtransSession.DISCONNECTED
         self.sk.close()
@@ -172,7 +333,60 @@ class UtransSession:
     def __repr__(self):
         return "[%s]%s@%s"%(self.token, self.name, self.address)
 
+class UtransAuth:
+    CLG_BASIC = "basic_clg"
+    AUTH_BASIC ="basic_auth"
+    
+    def __init__(self, pubkey_file, private_key_file, peer_pubkey_dir):
+        self.rsa = crypto.RSA()
+        self.rsa.load_pub_key(pubkey_file)
+        self.rsa.load_private_key(private_key_file)
+        self.peer_pubkey_dir = peer_pubkey_dir
 
+    def mac(self, key, data):
+        return hmac.new(key, data, digestmod="sha256").digest()
+    
+    def mac_verify(self, msg, key, peer_mac):
+        mac = self.mac(key, msg)
+        if mac != peer_mac:
+            return False
+        return True
+
+    def basic_clg(self, uuid, session_key, msg:bytes):
+        rsa = crypto.RSA()
+        if not rsa.load_pub_key(self.peer_pubkey_dir + "/" + uuid):
+            raise Exception("Peer has no pubkey")
+        encrypted_session_key = rsa.encrypt(session_key)
+        clg_data = pack_bytes((encrypted_session_key, msg))
+        return clg_data
+    
+    def basic_clg_solve(self, clg_data:bytes):
+        rsa = self.rsa
+        encrypted_session_key, auth_msg = unpack_bytes(clg_data)
+        session_key = rsa.decrypt(encrypted_session_key)
+        msg_mac = self.mac(session_key, auth_msg)
+        clg_reply_data = msg_mac
+        return (session_key, clg_reply_data, auth_msg)
+
+    def basic_clg_verify(self, clg_reply_data, msg, session_key):
+        msg_mac =self.mac(session_key, msg)
+        if msg_mac != clg_reply_data:
+            return False
+        return True
+
+    def register_pubkey(self, uuid, pubkey_type, pubkey):
+        if pubkey_type != "rsa":
+            return False
+        with open("%s/%s"%(self.peer_pubkey_dir, uuid), "wb") as f:
+            f.write(pubkey)
+        return True
+    
+    def get_pubkey(self):
+        return self.rsa.get_pub_key()
+
+    def check_peer_pubkey(self, uuid):
+        return os.path.isfile("%s/%s"%(self.peer_pubkey_dir, uuid))
+   
 #deprecate, use UtransTaskInfo instead
 @deprecatedBy(UtransTaskInfo)
 class UtransTask:
@@ -431,7 +645,12 @@ def get_options(args, option_list:list):
         arg_p += 1
     return (raw_arg, options)
  
-def main():
+ # cryptography
+
+
     pass
 if __name__ == "__main__":
     main()
+
+
+
