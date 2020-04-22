@@ -17,7 +17,10 @@ from termcolor import colored
 import socket
 import base64
 import hmac
+import hashlib
 import os
+import re
+import sys
 
 #decorators
 def deprecatedBy(replace_func):
@@ -39,9 +42,9 @@ def deprecated(func):
 
 def calculate_num_byte_size(num):
     size = 1
-    num <<= 8
+    num >>= 8
     while num != 0:
-        num <<= 8
+        num >>= 8
         size += 1
     return size
 #
@@ -52,9 +55,9 @@ def pack_bytes(bytes_list):
         if item_len <= 128:
             size_field = item_len.to_bytes(1, "little")
         else:
-            len_bytes_size = calculate_num_byte_size(item_len)
-            len_byte = (128 + len_bytes_size).to_bytes(1, "little")
-            len_bytes = item_len.to_bytes(item_bytes_size, "little")
+            item_len_bytes_size = calculate_num_byte_size(item_len)
+            len_byte = (128 + item_len_bytes_size).to_bytes(1, "little")
+            len_bytes = item_len.to_bytes(item_len_bytes_size, "little")
             size_field = len_byte + len_bytes
         packed_bytes = packed_bytes + size_field + item
     return packed_bytes
@@ -78,7 +81,24 @@ def unpack_bytes(packed_bytes):
         bytes_list.append(item)
         p = item_end
     return bytes_list
-        
+
+def pack_addr(addr:tuple):
+    return "%s:%d"%(addr[0], addr[1])
+
+def upack_addr(addr:str):
+    if type(addr) == bytes:
+        addr = addr.decode("utf8")
+    addr_pattern = re.compile(r'((?:[0-9]+\.){3}[0-9]+):([0-9]+)')
+    result = addr_pattern.match(addr)
+    if result == None:
+        raise Exception("invalid addr")
+    else:
+        addr_list = result.groups()
+        if len(addr_list) != 2:
+            return None
+        ip, port = addr_list
+        addr = (ip, int(port))
+        return addr
 
 # utils function
 def random_str(str_len = 8):
@@ -103,8 +123,6 @@ def print_list(l:list):
     else:
         for i in range(len(l)):
             print("[%d] %s"%(i, str(l[i])))
-
-
 
 # A comparer receives two parameters. The first is the item in the list.
 # The second is the parameter you give to get_index.
@@ -168,25 +186,6 @@ class DictList(dict):
             for i in self.keys():
                 print("[%d] %s"%(i, str(self[i])))
 
-class UtransConfig(dict):
-
-    def __init__(self):
-        self.config = dict()
-
-    def load_config(self, filename):
-        with open(filename, "r") as f:
-            self.config = json.load(f)
-    
-    def save_config(self, filename):
-        with open(filename, "w") as f:
-            json.dump(self.config, f)
-    
-    def __get_item__(self, key):
-        return self.config[key]
-    
-    def __set_item__(self, key, value):
-        self.config[key] = value
-
 # data 
 class UtransServerInfo:
     def __init__(self, name, addr):
@@ -200,15 +199,30 @@ class UtransServerInfo:
         return "%s:%s"%(str(self.name), str(self.addr))
 
 class UtransTaskInfo:
-    def __init__(self, uuid = None, session_index = -1):
+    T_CONN = 0
+    T_S_MSG = 1
+    T_R_MSG = 2
+    T_S_FILE = 3
+    T_R_FILE = 4
+    def __init__(self, uuid = None, session_index = -1, type = None):
         if uuid == None:
             self.uuid = random_str(10)
         self.session_index = session_index
+        self.type = type
         self.running = True
     
     def stop(self):
         self.running = False
 
+    def set_extra_data(self, data):
+        self.data = data
+    
+    def get_extra_data(self):
+        data = self.data
+        self.data = None
+        return data
+
+@deprecated
 class UtransSessionNew:
     def __init__(self, name = None, uuid = None, peer_addr = None, session_key = None, send_sk = None, recv_sk = None):
         self.peer_name = name
@@ -218,7 +232,8 @@ class UtransSessionNew:
         self.send_sk = send_sk
         self.recv_sk = recv_sk
         self.id = -1
-        self.auth_counter = 1000000000000000
+        self_counter = 300000000000
+        self.peer_auth_counter = 10000000000
         self.status = UtransSession.CONNECTED
 
     def set_id(self, id):
@@ -235,6 +250,26 @@ class UtransSessionNew:
     
     def set_peer_addr(self, addr):
         self.peer_addr = addr
+    
+    def set_peer_auth_counter(self, peer_auth_counter):
+        self.peer_auth_counter = int.from_bytes(peer_auth_counter, "little")
+    
+    def check_peer_auth_counter(self, peer_auth_counter):
+        peer_auth_counter = int.from_bytes(peer_auth_counter, "little")
+        if peer_auth_counter != self.peer_auth_counter:
+            return False
+        self.peer_auth_counter += 1
+        return True
+    
+    def get_auth_counter(self):
+        auth_counter =  self_counter.to_bytes(16, "little")
+        self_counter += 1
+        return auth_counter
+
+    def set_auth_counter(self, auth_counter):
+        auth_counter = int.from_bytes(auth_counter, "little")
+        self_counter = auth_counter
+    
     def set_send_sk(self, sk:socket.socket):
         self.status = UtransSession.CONNECTED
         self.send_sk = sk
@@ -242,19 +277,6 @@ class UtransSessionNew:
     def set_recv_sk(self, sk:socket.socket):
         self.status = UtransSession.CONNECTED
         self.recv_sk = sk
-
-    def get_auth_counter(self):
-        auth_counter = "%s"%(self.auth_counter)
-        self.auth_counter += 1
-        return auth_counter.encode("utf8")
-
-    def look_auth_counter(self):
-        auth_counter = "%s"%(self.auth_counter)
-        return auth_counter.encode("utf8")
-
-    def sync_auth_counter(self, auth_counter):
-        auth_counter = int(auth_counter)
-        self.auth_counter = auth_counter + 1
     
     def get_session_key(self):
         return self.session_key    
@@ -303,90 +325,6 @@ class UtransSessionNew:
     def __repr__(self):
         return "[%s]%s@%s"%(self.id, self.name, self.peer_addr)
 
-class UtransSession:
-    CONNECTED = "connected"
-    DISCONNECTED = "disconnected"
-    T_RECV = "t_recv"
-    T_SEND = "T_send"
-
-    def __init__(self, name, address, sk, session_type = None):
-        self.name = name
-        # doesn't use
-        self.uuid = -1
-        self.address = address
-        self.sk = sk
-        self.status = UtransSession.CONNECTED
-        if session_type == None:
-            session_type = UtransSession.T_SEND
-        self.type = session_type
-        self.token = random_str(10)
-
-
-    def close(self):
-        self.status = UtransSession.DISCONNECTED
-        self.sk.close()
-    
-    
-    def __str__(self):
-        return "%s"%(self.name)
-    
-    def __repr__(self):
-        return "[%s]%s@%s"%(self.token, self.name, self.address)
-
-class UtransAuth:
-    CLG_BASIC = "basic_clg"
-    AUTH_BASIC ="basic_auth"
-    
-    def __init__(self, pubkey_file, private_key_file, peer_pubkey_dir):
-        self.rsa = crypto.RSA()
-        self.rsa.load_pub_key(pubkey_file)
-        self.rsa.load_private_key(private_key_file)
-        self.peer_pubkey_dir = peer_pubkey_dir
-
-    def mac(self, key, data):
-        return hmac.new(key, data, digestmod="sha256").digest()
-    
-    def mac_verify(self, msg, key, peer_mac):
-        mac = self.mac(key, msg)
-        if mac != peer_mac:
-            return False
-        return True
-
-    def basic_clg(self, uuid, session_key, msg:bytes):
-        rsa = crypto.RSA()
-        if not rsa.load_pub_key(self.peer_pubkey_dir + "/" + uuid):
-            raise Exception("Peer has no pubkey")
-        encrypted_session_key = rsa.encrypt(session_key)
-        clg_data = pack_bytes((encrypted_session_key, msg))
-        return clg_data
-    
-    def basic_clg_solve(self, clg_data:bytes):
-        rsa = self.rsa
-        encrypted_session_key, auth_msg = unpack_bytes(clg_data)
-        session_key = rsa.decrypt(encrypted_session_key)
-        msg_mac = self.mac(session_key, auth_msg)
-        clg_reply_data = msg_mac
-        return (session_key, clg_reply_data, auth_msg)
-
-    def basic_clg_verify(self, clg_reply_data, msg, session_key):
-        msg_mac =self.mac(session_key, msg)
-        if msg_mac != clg_reply_data:
-            return False
-        return True
-
-    def register_pubkey(self, uuid, pubkey_type, pubkey):
-        if pubkey_type != "rsa":
-            return False
-        with open("%s/%s"%(self.peer_pubkey_dir, uuid), "wb") as f:
-            f.write(pubkey)
-        return True
-    
-    def get_pubkey(self):
-        return self.rsa.get_pub_key()
-
-    def check_peer_pubkey(self, uuid):
-        return os.path.isfile("%s/%s"%(self.peer_pubkey_dir, uuid))
-   
 #deprecate, use UtransTaskInfo instead
 @deprecatedBy(UtransTaskInfo)
 class UtransTask:
@@ -399,7 +337,6 @@ class UtransTask:
     
     def stop(self):
         self.running = False
-
 
 class RunnableTask():
     def __init__(self, func, args, delay = 0):
@@ -584,6 +521,26 @@ def link_args(args):
         logger.debug("arg not complete")
         return None
     return new_args
+
+class Waiter():
+
+    def __init__(self, interval, check_freq = 0.1, notice = ""):
+        self.counter = 0
+        self.counter_full = int(interval / check_freq)
+        self.check_freq = check_freq
+        self.print_no_cache(notice)
+        
+    def print_no_cache(self, msg):
+        sys.stdout.write(msg)
+        sys.stdout.flush()
+    
+    def wait(self, info):
+        if self.counter >= self.counter_full:
+            self.print_no_cache(info)
+            self.counter = 0
+        time.sleep(self.check_freq)
+        self.counter += 1
+
 
 # Change the way of handling faults to raise exception instead of exit
 def get_options(args, option_list:list):

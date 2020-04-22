@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 # Date: Wed Mar 11 17:42:22 2020
 # Author: January
+from utrans_utils import * 
+
 class UtransError:
     CONNECTION_ERROR = "connetion_error"
     LOCAL_ERROR = "local error"
@@ -15,6 +17,13 @@ class UtransError:
     PROTOCAL_ERROR = "protocal _error"
     OK = "ok"
 
+class UtransContext():
+
+    def get_session_manager(self):
+        pass
+
+    def get_auth_manager(self):
+        pass
 
 class UtransCallback:
 
@@ -49,21 +58,22 @@ class UtransCallback:
     def on_msg_receive(self, message, task_info):
         pass
 
+    # general async callback
+    def on_task_start(self, task_info):
+        pass
+
+    def on_task_progress(self, task_info):
+        pass
+
+    def on_task_finished(self, result, task_info):
+        pass
+
     # connection
     # The method should return an session index
     def on_new_session(self, session):
         return None
     
-    def on_session_close(self, session_index):
-        pass
-    
-    def on_session_close_recv(self, session_index):
-        pass
-
-    def on_session_close_send(self, session_index):
-        pass
-
-    def on_connect_error(self, error):
+    def on_session_close(self, session):
         pass
 
     # ask for user's confirmation
@@ -81,40 +91,29 @@ class UtransCallback:
     def on_start_scan(self):
         pass
 
-    # auth_client
-    
-    # return (session_key, challange_reply_data)
-    def on_solve_challenge(self, challenge_type, challenge_data, session):
-        return (b'', b'')
-
-    # auth_server
-    def on_normal_auth(self, auth_type, peer_auth_data, session):
+    # auth
+    def on_normal_auth(self, msg, session):
         pass
     
-    # return (challenge_data, verify_aux_data)
-    def on_challenge_peer(self, session):
-        return (b"challenge_type", b"challenge_data")
+    def on_set_register_data(self, msg):
+        pass
+
+    def on_set_msg_data(self, msg, session):
+        return True
     
-    # return (auth_data, aux_data)
-    def on_need_auth_data(self, session):
-        return (b"auth_type", b"auth_data")
+    def on_need_current_session(self):
+        return None
     
-    def on_verify_challenge(self, reply_data, session):
-        return False
-    
-    def on_check_client_pubkey(self, uuid):
-        return False
-    
-    def on_register_pubkey(self, peer_uuid, pubkey):
-        return False
-    
-    def on_need_session_key(self, key_len):
-        return b''
-    
-    #auth common
     def on_search_session(self, uuid):
         return None
     
+    def on_register_peer(self, msg):
+        return True
+    
+    def on_check_register(self, peer_uuid):
+        return True
+    
+
     # common
     def on_need_name(self):
         return ''
@@ -122,26 +121,10 @@ class UtransCallback:
     def on_need_uuid(self):
         return ''
 
+    def on_need_own_server_addr(self):
+        return "unknown"
     
-class UtransSKCrypto:
 
-    def set_key(self, key):
-        return False
-
-    def set_iv(self, iv):
-        return False
-    
-    def mac(self, data):
-        return b''
-    
-    def encrypt(self, plain_data):
-        return b''
-    
-    def decrypt(self, encrypted_data):
-        return b''
-
-    
-class UtransAKCrypto:
 
     def set_pubkey(self, key):
         return False
