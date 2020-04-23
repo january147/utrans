@@ -1,4 +1,4 @@
-utrans_data/*
+utrans_data
 *.exe
 __pycache__
 keys/*
@@ -6,5 +6,5 @@ keys/*
 *.der
 *.x509
 *.rsa
-
 .vscode
+

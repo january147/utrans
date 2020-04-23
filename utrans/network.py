@@ -102,8 +102,8 @@ class FrameHeader():
         return b_frame_type + b_payload_size
     
     def print_info(self):
-        print("type: %02x"%(self.frame_type))
-        print("payload_size: %d"%(self.payload_size))
+        logger.debug("type: %02x"%(self.frame_type))
+        logger.debug("payload_size: %d"%(self.payload_size))
 
     @staticmethod
     def from_bytes(bytes_header):
@@ -155,15 +155,18 @@ class FrameSocket(socket.socket):
     T_LARGE = 0x80
     T_OP = 0x1
 
-    def __init__(self, family=-1, type=-1, proto=-1, fileno=None):
-        super().__init__(family, type, proto, fileno)
+    def __init__(self, family, type, fileno = None):
+        if fileno != None:
+            super().__init__(family, type, fileno = fileno)
+        else:
+            super().__init__(family, type)
         self.cache = Cache()
         self.trans_task = FrameTransTask()
 
     @staticmethod
     def from_socket(sk:socket.socket):
         fd = sk.detach()
-        return FrameSocket(sk.family, sk.type, sk.proto, fileno=fd)
+        return FrameSocket(sk.family, sk.type, fileno=fd)
     
     def send_frame(self, data:bytes):
         if not self.trans_task.is_finished():
@@ -280,7 +283,13 @@ class FrameSocket(socket.socket):
     #override
     def accept(self):
         sk, addr = super().accept()
-        return (FrameSocket.from_socket(sk), sk)
+        return (FrameSocket.from_socket(sk), addr)
+    
+    def __str__(self):
+        return "[%d]-self[%s]-peer[%s]"%(self.fileno(), str(self.getsockname()), str(self.getpeername()))
+    
+    def __repr__(self):
+        return self.__str__()
     
 def test_server():
     sk = FrameSocket(socket.AF_INET, socket.SOCK_STREAM)

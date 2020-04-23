@@ -3,15 +3,24 @@
 # Date: Fri Mar 13 21:48:17 2020
 # Author: January
 
-from utrans_utils import *
-from utrans_interface import *
-from utrans_new import *
+from utrans.core import *
+from utrans.utils import *
+from utrans.interface import *
 import progressbar
 import sys
-from crypto import openssl as crypto
 import hashlib
 import hmac
+import logging
+import termcolor
+import platform
+import _thread
+import threading
 
+if platform.system() == "Windows":
+    import colorama
+    colorama.init()
+
+logging.basicConfig(level=logging.DEBUG)
 data_channel_mngr = DataChannelManager()
 
 class UtransConfig():
@@ -46,6 +55,7 @@ class UtransCmdMode(UtransCallback):
         self.self_server_addr = (socket.gethostbyname(self.name), self.port)
         self.init_cmd_mode()
         self.init_callback()
+        self.display_lock = _thread.allocate_lock()
     
     # implement callback
     def init_callback(self):
@@ -91,10 +101,18 @@ class UtransCmdMode(UtransCallback):
     def on_task_finished(self, status, task_info:UtransTaskInfo):
         task_info.running = False
         if task_info.type == UtransTaskInfo.T_CONN:
-            if status == UtransError.OK:
-                print("success to connect")
-            else:
+            if status != UtransError.OK:
                 print("fail to connect, %s"%(status))
+            else:
+                session = task_info.get_extra_data()
+                if self.session_mngr.has_session(session):
+                    print("reconnect to %s"%(session.peer_name))
+                else:
+                    print("connect to %s"%(session.peer_name))
+                    self.session_mngr.append(session)
+                self.current_session = session
+                
+
         elif task_info.type == UtransTaskInfo.T_R_FILE or task_info.type == UtransTaskInfo.T_S_FILE:
             if status == UtransError.OK:
                 self.pb.finish()
@@ -111,43 +129,36 @@ class UtransCmdMode(UtransCallback):
     def on_receive_file(self, filename, filesize, task_info):
         session_index = task_info.session_index
         session = self.session_mngr.get_session_by_index(session_index)
+        # this is a asynchronous operation, so put a \n before the output msg to make it look better.
+        print()
         if session != None:
             notice = "%s@%s[%s]"%(session.peer_name, session.peer_addr, session.id)
         else:
             notice = None
-        print("File[%s][%d] from %s"%(filename, filesize, notice))
+        print(termcolor.colored("File[%s][%d] from %s"%(filename, filesize, notice), "yellow"))
         return task_info
     
     def on_receive_msg(self, message, task_info):
         session_index = task_info.session_index
         session = self.session_mngr.get_session_by_index(session_index)
+        # this is a asynchronous operation, so put a \n before the output msg to make it look better.
+        print()
         if session != None:
             notice = "%s@%s[%s]"%(session.peer_name, session.peer_addr, session.id)
         else:
             notice = None
-        print("Message from %s"%(notice))
+        print(termcolor.colored("Message from %s"%(notice), "yellow"))
         print(message)
     
     # connection
     def on_new_session(self, session:UtransSession):
-        if self.session_mngr.get_session_by_index(session.id) != None:
-            print("reconnect to", str(session))
-            return session.id
+        # new session from server(asyn), put a \n before the output msg to make it look better
+        print()
+        if self.session_mngr.has_session(session):
+            print("reconnect from", str(session))
         else:
-            index = self.session_mngr.append(session)
-            if session.send_sk != None:
-                self.current_session = session
-                print("connect to", str(session))
-            else:
-                print("connect from", str(session))
-            return index
-    
-    
-        if session_index in self.sessions.keys():
-            session = self.sessions[session_index]
-            session.close_recv_sk()
-            if session.status == UtransSession.DISCONNECTED:
-                self.on_session_close(session_index)
+            print("connect from", str(session))
+            self.session_mngr.append(session)
     
     def on_session_close(self, session):
         self.session_mngr.remove(session.id)
@@ -163,25 +174,32 @@ class UtransCmdMode(UtransCallback):
     def get_self_server_port(self):
         return self.port
     
-    # ask for user's confirmation
-    def on_need_decision(self, info):
+    def prompt_user_decision(self, info):
         print(info)
-        # send a request to main thread, ask for confirm
-        prompt_channel = data_channel_mngr.get_data_channel("prompt")
-        response_channel = data_channel_mngr.get_data_channel("response")
-        # receive reponse from main thread
-        prompt_channel.put("request_decision")
-        cmd = response_channel.get()
-        if cmd == "y":
+        print("(input [yes] for continue, [no] for stop):")
+        if threading.current_thread() == threading.main_thread():
+            cmd = input()
+        else:
+            prompt_channel = data_channel_mngr.get_data_channel("prompt")
+            response_channel = data_channel_mngr.get_data_channel("response")
+            # receive reponse from main thread
+            print("send request")
+            prompt_channel.put("request_decision")
+            print("get result")
+            cmd = response_channel.get()
+        if cmd.startswith("y"):
             return True
         else:
             return False
+    # ask for user's confirmation
 
-    # def on_need_decision(self, info):
-    #     return True
+    def on_need_decision(self, info):
+        return True
     
     # scan server
     def on_new_server(self, server_info):
+        print(("New_server: %s\n"
+               "addr: %s\n")%(server_info.name, str(server_info.addr)))
         self.available_servers.append(server_info)
         self.find_new_server = True
 
@@ -194,18 +212,23 @@ class UtransCmdMode(UtransCallback):
     def exit_cmd_mode(self):
         self.server.stop_server()
         
+
+        
     def run(self):
         event_channel = data_channel_mngr.get_data_channel("prompt")
         while True:
             try:
                 if self.current_session != None:
                     session = self.current_session
-                    prompt = "%s@%s(%d): "%(self.name, session.peer_name, session.id)
+                    prompt = "%s@%s(%d):"%(self.name, session.peer_name, session.id)
                 else:
-                    prompt = "%s@None: "%(self.name)
+                    prompt = "%s@None:"%(self.name)
                 # if sys.argv[2] == "9998":
                 #     time.sleep(500)
-                raw_data = input(prompt)
+                if not self.display_lock.locked():
+                    termcolor.cprint(prompt, "blue", "on_yellow", attrs=["bold"], end = " ")
+                logger.debug("main thread waiting for input")
+                raw_data = input()
             except BaseException as e:
                 if type(e) != KeyboardInterrupt:
                     print(e)
@@ -216,6 +239,7 @@ class UtransCmdMode(UtransCallback):
                 continue
 
             if not event_channel.empty():
+                logger.debug("get request")
                 event_channel.get_nowait()
                 self.out_data_channel.put(raw_data)
                 continue
@@ -287,7 +311,7 @@ class UtransCmdMode(UtransCallback):
                     # self is context
                     session = UtransSession(self, peer_addr = addr)
                     # self is callback
-                    task_info = session.connect(self, block = False)
+                    task_info = session.connect(self)
 
             elif cmd == "switch":
                 if len(raw_args) <= 0:
@@ -350,22 +374,13 @@ class UtransCmdMode(UtransCallback):
         
     def scan_server(self, one_to_exit = False):
         self.scanner.start_scan(self)
-        if one_to_exit:
-            try:
-                while not self.find_new_server:
-                    time.sleep(0.2)
-            except:
-                pass
-            self.scanner.stop_scan()
-            return
-        else:
-            print("scanning, press ctrl+c to stop")
-            try:
-                while True:
-                    time.sleep(10)
-            except:
-                pass
-            self.scanner.stop_scan()
+        print("scanning, press ctrl+c to stop")
+        try:
+            while True:
+                time.sleep(10)
+        except:
+            pass
+        self.scanner.stop_scan()
 
     def message_send_mode(self):
         print("doesn't support")

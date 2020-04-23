@@ -3,10 +3,9 @@
 # Date: Wed Apr 15 09:09:51 2020
 # Author: January
 
-from utrans_utils import *
-from utrans_interface import *
-from utrans_network import *
-from crypto import openssl as crypto
+from utrans.utils import *
+from utrans.interface import *
+from utrans.network import *
 import hashlib
 import hmac
 import os
@@ -20,9 +19,9 @@ import re
 import base64
 import queue
 import traceback
+import termcolor
 
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger("utrans_new")
+logger = logging.getLogger("utranscore")
 
 class UtransDefault:
     SERVICE_PORT = 9999
@@ -243,10 +242,10 @@ class UtransScanner:
         self.scan_sk.settimeout(0.1)
         # other data
         self.__discovered_servers = set()
-        self.ip = socket.gethostbyname(socket.gethostname())
+        self.ip = get_self_ip()
 
         # scan request broadcast addr
-        ip = socket.gethostbyname(socket.gethostname()).split(".")
+        ip = self.ip.split(".")
         ip[3] = "255"
         broadcast_ip = '.'.join(ip)
         self.broadcast_addr = (broadcast_ip, scan_port)
@@ -254,16 +253,23 @@ class UtransScanner:
     
     def __do_scan_service(self, callback:UtransCallback):
         callback.on_start_scan()
+        count = 0
+        logger.debug("self ip is [%s]"%(self.ip))
         while self.scanning:
             try:
                 data, address = self.scan_sk.recvfrom(4096)
             except socket.timeout:
+                count += 1
+                if count >= 10:
+                    count = 0
+                    self.__send_scan_request()
                 continue
 
             # 过滤本机发出的数据包
-            # if self.ip == address[0] or address[0] == "127.0.0.1":
-            #     continue
-            logger.debug("scanner recv [%s]"%(data))
+            if self.ip == address[0] or address[0] == "127.0.0.1":
+                continue
+            
+            logger.debug("scanner recv [%s] from %s"%(data, str(address)))
             try:
                 msg = Message.from_bytes(data)
             except:
@@ -283,7 +289,7 @@ class UtransScanner:
                 logger.debug("invalid addr in scan reply")
                 continue
             address = (address[0], addr[1])
-            if address not in self.__discovered_servers:
+            if self.scanning and address not in self.__discovered_servers:
                 self.__discovered_servers.add(address)
                 new_server = UtransServerInfo(server_name, address)
                 callback.on_new_server(new_server)
@@ -322,7 +328,7 @@ class UtransScanResponder:
             self.name = name
         
         if server_ip == None:
-            self.server_ip = socket.gethostbyname(self.name)
+            self.server_ip = get_self_ip()
         else:
             self.server_ip = server_ip
         
@@ -356,8 +362,8 @@ class UtransScanResponder:
                 data, addr = self.sk.recvfrom(1024)
             except Exception as e:
                 logger.debug("scan reponder failure")
-                print(e)
-            logging.debug("scan server recv [%s]"%(data))
+                return
+            logging.debug("scan server recv [%s] from %s"%(data, str(addr)))
             try:
                 msg = Message.from_bytes(data)
             except:
@@ -838,12 +844,12 @@ class UtransServer():
         callback = self.callback
         session = utrans.authenticate_client(self.context)
         if session == None:
-            print("fail to authenticate")
+            logger.debug("fail to authenticate")
             return 
         else:
-            print("authenticate ok")
+            logger.debug("authenticate ok")
             session.print_info()
-        session_index = callback.on_new_session(session)
+        callback.on_new_session(session)
 
         # ok, start handling requests
         while True:
@@ -853,7 +859,9 @@ class UtransServer():
                 traceback.print_exc()
                 callback.on_session_close(session)
                 break
-            task_info = UtransTaskInfo(session_index = session_index)
+            logger.debug("acquire lock")
+            self.context.display_lock.acquire()
+            task_info = UtransTaskInfo(session_index = session.id)
             if msg.type == Message.MT_SEND_FILE:
                 utrans.receive_file(msg, callback, task_info)
             elif msg.type == Message.MT_SEND_MSG:
@@ -861,7 +869,9 @@ class UtransServer():
             else:
                 utrans.send_not_support_info()
                 print("unknown operation: %s"%(msg_type))
-    
+            self.context.display_lock.release()
+            logger.debug("release lock")
+
     # open a new thread to broadcast
     def run(self, callback):
         self.init()
@@ -873,10 +883,9 @@ class UtransServer():
                 logger.debug("connection from" + str(addr))
                 _thread.start_new_thread(self.handle_client, (ssk, addr))
         except:
-            traceback.print_exc()
+            logger.debug("server exit")
         finally:
             self.running = False
-            self.lsk.close()
             self.lsk = None
     
     def stop_scan_service(self):
@@ -886,10 +895,12 @@ class UtransServer():
         if self.running == True:
             if self.lsk != None:
                 self.lsk.close()
+                self.lsk = None
             self.running = False
+            self.stop_scan_service()
     
     def async_run(self, callback):
-        _thread.start_new_thread(self.run, (callback,))
+        return _thread.start_new_thread(self.run, (callback,))
 
 class UtransSession():
     F_INIT = 0x1
@@ -1043,7 +1054,7 @@ class UtransSession():
     def __do_connect(self, callback, task_info):
         context = self.context
         ssk = FrameSocket(socket.AF_INET, socket.SOCK_STREAM)
-        ssk.settimeout(3)
+        ssk.settimeout(8)
 
         if self.peer_addr == None:
             logger.error("No target to connect")
@@ -1066,7 +1077,7 @@ class UtransSession():
             print("authenticate ok")
             self.print_info()
         ##########################################################
-        callback.on_new_session(self)
+        task_info.set_extra_data(self)
         callback.on_task_finished(UtransError.OK, task_info)
         return True
 
@@ -1075,7 +1086,6 @@ class UtransSession():
             raise Exception("Session not ready for send, try connecting to a server")
         if not os.path.exists(filename):
             raise Exception("No such file %s"%(filename))
-        self.send_lock.acquire()
         task_info = UtransTaskInfo(session_index=self.id, type = UtransTaskInfo.T_S_FILE)
         utrans = UtransCore(self.send_sk)
         if block:
@@ -1087,7 +1097,6 @@ class UtransSession():
     def send_message(self, msg, callback, block = False):
         if not self.is_send_enabled():
             raise Exception("Session not ready for send, try connecting to a server")
-        self.send_lock.acquire()
         utrans = UtransCore(self.send_sk)
         task_info = UtransTaskInfo(session_index = self.id, type = UtransTaskInfo.T_S_MSG)
         if block:
@@ -1097,12 +1106,15 @@ class UtransSession():
         return task_info
 
     def print_info(self):
-        print("peer_name:", self.peer_name)
-        print("peer uuid:", self.peer_uuid)
-        print("session key:", self.session_key.hex())
-        print("peer addr:", self.peer_addr)
-        print("recv_sk:", self.recv_sk)
-        print("send_sk:", self.send_sk)
+        msg = (
+            "peer_name: %s\n"
+            "peer_uuid: %s\n"
+            "session_key: %s\n"
+            "peer_addr: %s\n"
+            "recv_sk: %s\n"
+            "send_sk: %s\n"%(self.peer_name, self.peer_uuid, self.session_key.hex(), str(self.peer_addr), str(self.recv_sk), str(self.send_sk))
+        )
+        logger.debug(msg)
     
     def __str__(self):
         return "%s"%(self.peer_name)
@@ -1188,10 +1200,10 @@ class UtransAuth:
         return pub_cipher
     
     def get_rnd_auth_counter(self, size = 16):
-        return crypto.rand_bytes(size)
+        return Random.new().read(size)
     
     def get_rnd_session_key(self, size = 16):
-        return crypto.rand_bytes(size)
+        return Random.new().read(size)
 
     def check_peer_pubkey(self, uuid):
         return os.path.isfile("%s/%s"%(self.peer_pubkey_dir, uuid))
@@ -1329,11 +1341,11 @@ class UtransAuth:
         peer_uuid = msg.values[2]
         register_data = msg.get_data()
         peer_pubkey, sig = unpack_bytes(register_data)
-        notice_info = ( "Peer request register:\n"
+        notice_info = ( termcolor.colored("Peer request register, make sure you know who he is:\n", "red") + 
                         "Peer name: %s\n"
                         "Peer uuid: %s\n"
                         "Peer Pubkey:\n %s")%(peer_name, peer_uuid, peer_pubkey.decode("utf8"))
-        if not self.context.on_need_decision(notice_info):
+        if not self.context.prompt_user_decision(notice_info):
             return False
         # check if uuid is corresponding to pubkey
         hash_ob = self.get_hash_ob()
@@ -1363,10 +1375,20 @@ class UtransSessionManager():
         self.sessions = DictList()
     
     def append(self, session:UtransSession):
-        index = self.sessions.append(session)
-        session.set_id(index)
-        return index
+        if self.has_session(session):
+            logger.warning("try to append existed session")
+            return session.id
+        else:
+            index = self.sessions.append(session)
+            session.set_id(index)
+            return index
     
+    def has_session(self, session):
+        if session.id in self.sessions.keys():
+            return True
+        else:
+            return False
+
     def remove(self, index):
         if index in self.sessions.keys():
             session = self.sessions.pop(index)

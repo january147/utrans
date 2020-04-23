@@ -4,8 +4,8 @@
 # Author: January
 
 from queue import Queue
-from utrans_interface import *
-from crypto import openssl as crypto
+from utrans.interface import *
+from termcolor import colored
 import threading
 import ctypes
 import time
@@ -13,7 +13,6 @@ import _thread
 import random
 import string
 import json
-from termcolor import colored
 import socket
 import base64
 import hmac
@@ -100,6 +99,15 @@ def upack_addr(addr:str):
         addr = (ip, int(port))
         return addr
 
+ip = None
+def get_self_ip():
+    global ip
+    if ip == None:
+        sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sk.connect(("8.8.8.8", 53))
+        addr = sk.getsockname()
+        ip = addr[0]
+    return ip
 # utils function
 def random_str(str_len = 8):
     result_str = ''.join((random.choice(string.ascii_letters) for i in range(str_len)))

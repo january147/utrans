@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 # Date: Wed Mar 11 17:42:22 2020
 # Author: January
-from utrans_utils import * 
 
 class UtransError:
     CONNECTION_ERROR = "connetion_error"
@@ -120,36 +119,6 @@ class UtransCallback:
     
     def on_need_uuid(self):
         return ''
-
-    def on_need_own_server_addr(self):
-        return "unknown"
-    
-
-
-    def set_pubkey(self, key):
-        return False
-
-    def set_private_key(self, key):
-        return False
-
-    def get_pubkey(self):
-        return b''
-    
-    def get_uuid(self):
-        return ''
-    
-    def decrypt(self, encrypted_data):
-        return b''
-    
-    def encrypt(self, plain_data):
-        return b''
-    
-    def sign(self, data):
-        return b''
-    
-    def verify(self, data):
-        return False
-   
 
 def main():
     pass
