@@ -20,7 +20,8 @@ if platform.system() == "Windows":
     import colorama
     colorama.init()
 
-logging.basicConfig(level=logging.DEBUG)
+# set logging level
+logging.basicConfig(level=logging.ERROR)
 data_channel_mngr = DataChannelManager()
 
 class UtransConfig():
@@ -226,7 +227,7 @@ class UtransCmdMode(UtransCallback):
                 # if sys.argv[2] == "9998":
                 #     time.sleep(500)
                 if not self.display_lock.locked():
-                    termcolor.cprint(prompt, "blue", "on_yellow", attrs=["bold"], end = " ")
+                    termcolor.cprint(prompt, "green", attrs=["bold"], end = " ")
                 logger.debug("main thread waiting for input")
                 raw_data = input()
             except BaseException as e:
@@ -366,6 +367,8 @@ class UtransCmdMode(UtransCallback):
                     session.print_info()
             elif cmd == "test":
                 Runnable(self.run, ())
+            elif cmd == "help":
+                print_usage()
             elif cmd == "q":
                 self.exit_cmd_mode()
                 return
