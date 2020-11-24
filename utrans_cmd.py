@@ -25,7 +25,7 @@ logging.basicConfig(level=logging.ERROR)
 data_channel_mngr = DataChannelManager()
 
 class UtransConfig():
-    data_dir = "./utrans_data"
+    data_dir = "utrans_config"
     pukey_filepath = "rsa_pub.pem"
     private_key_filepath = "rsa.pem"
     peer_key_dirpath = "keys"
@@ -35,6 +35,18 @@ class UtransConfig():
 
     @staticmethod
     def load_config():
+        # Default path for config dir is $HOME/.config, otherwise, it will be placed at the same dir as the script itself.
+        if platform.system() == "Linux":
+            home_config_dir = os.getenv("HOME")+"/.config"
+        elif platform.system() == "Windows":
+            home_config_dir = os.getenv("UserProfile")
+        else:
+            home_config_dir = ""
+        
+        # try to create utrans data dir in home dir, if failed, create utrans data dir in current dir.
+        if os.path.isdir(home_config_dir):
+            UtransConfig.data_dir = home_config_dir + "/" + UtransConfig.data_dir
+        
         if not os.path.isdir(UtransConfig.data_dir):
             os.mkdir(UtransConfig.data_dir)
         UtransConfig.pukey_filepath = UtransConfig.data_dir + "/" + UtransConfig.pukey_filepath
