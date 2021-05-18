@@ -32,6 +32,7 @@ class Message:
     FIELD_SPLIT_CHAR = "&"
     KEY_VALUE_SPLIT_CHAR = "@"
 
+    # MT 表示 Message Type
     MT_SEND_FILE = "send_file"
     MT_SEND_MSG = "send_msg"
     MT_SCAN_REQ = "scan_req"
@@ -53,9 +54,12 @@ class Message:
     @staticmethod
     def load_type():
         Message.MSG_TYPE = {
+            # 数据传输
             Message.MT_SEND_FILE : ("msg_type", "name", "size"),
             Message.MT_SEND_MSG : ("msg_type", "size", "data"),
             Message.MT_COM_REPLY : ("msg_type", "status", "info"),
+
+            # 服务发现
             Message.MT_SCAN_REQ : ("msg_type", ),
             Message.MT_SCAN_REPLY : ("msg_type", "name", "addr"),
 
@@ -141,7 +145,7 @@ class Message:
                 raise Exception("invalid key in msg type [%s]"%(msg_type))
 
     @staticmethod
-    def check_ctrl_char(datas):
+    def check_ctrl_char(datas : list):
         if datas == None:
             return
         logger.debug("checking msg:\n%s"%(str(datas)))
@@ -149,7 +153,7 @@ class Message:
             if data == None:
                 continue
             if Message.msg_char_check.search(data) != None:
-                raise Exception("Data can't contains [:&]")
+                raise Exception("Data can't contains ['%s', '%s']"%(Message.FIELD_SPLIT_CHAR, Message.KEY_VALUE_SPLIT_CHAR))
     
     @staticmethod
     def pack_session_init(name, uuid, data = None):
@@ -159,6 +163,7 @@ class Message:
     def pack_session_final(server_port, data = None):
         values = [Message.MT_SESSION_FINAL, str(server_port), data]
         return Message(values)
+    
     # ("msg_type", "name", "uuid", "encode", "data")
     @staticmethod
     def pack_session_reply(name, uuid, data = None):
@@ -1166,6 +1171,7 @@ class UtransAuth:
     def get_name(self):
         return self.name
     
+    # use pubkey's hash as uuid
     def get_uuid(self):
         if self.uuid == None:
             hash_ob = self.get_hash_ob()

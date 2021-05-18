@@ -14,7 +14,6 @@ class NewFrameInDataException(Exception):
     def get_new_frame_data(self):
         return self.new_frame_data
 
-
 class DataInCompleteEXception(Exception):
     def __init__(self):
         super().__init__("data end with 0xff, not complete")
@@ -93,7 +92,7 @@ class FrameHeader():
         self.payload_size = payload_size
         self.op_header = optional_header
 
-    def set_op_header(slef, op_header):
+    def set_op_header(self, op_header):
         self.op_header = op_header
 
     def to_bytes(self):

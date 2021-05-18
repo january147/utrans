@@ -16,7 +16,10 @@ try:
 except:
     result = input("Crypto is not installted, should install it?(y or n)")
     if result.startswith("y"):
-        os.system("pip3 install -i %s pycryptodome"%(pip_src))
+        ret = os.system("pip3 install -i %s pycryptodome"%(pip_src))
+        if ret != 0:
+            print("Fail to install pycryptodome")
+            exit(-1)
     else:
         print("abort")
         exit(-1)
@@ -27,7 +30,10 @@ try:
 except:
     result = input("progressbar is not installed, should install it?(y or n)")
     if result.startswith("y"):
-        os.system("pip3 install -i %s progressbar"%(pip_src))
+        ret = os.system("pip3 install -i %s progressbar"%(pip_src))
+        if ret != 0:
+            print("Fail to install progressbar")
+            exit(-1)        
     else:
         print("abort")
         exit(-1)
@@ -38,7 +44,10 @@ try:
 except:
     result = input("termcolor is not installted, should install it?(y or n)")
     if result.startswith("y"):
-        os.system("pip3 install -i %s termcolor"%(pip_src))
+        ret = os.system("pip3 install -i %s termcolor"%(pip_src))
+        if ret != 0:
+            print("Fail to install termcolor")
+            exit(-1)
     else:
         print("abort")
         exit(-1)
@@ -50,7 +59,10 @@ if platform.system() == "Windows":
     except:
         result = input("colorama is not installted, should install it?(y or n)")
         if result.startswith("y"):
-            os.system("pip3 install -i %s colorama"%(pip_src))
+            ret = os.system("pip3 install -i %s colorama"%(pip_src))
+            if ret != 0:
+                print("Fail to install colorama")
+                exit(-1)
         else:
             print("abort")
             exit(-1)

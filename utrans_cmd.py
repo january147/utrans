@@ -29,8 +29,11 @@ class UtransConfig():
     pukey_filepath = "rsa_pub.pem"
     private_key_filepath = "rsa.pem"
     peer_key_dirpath = "keys"
+    # local udp port
     scan_server_port = 9999
+    # remote udp port
     scan_port = 9999
+    # local tcp port
     server_port = 9999
 
     @staticmethod
