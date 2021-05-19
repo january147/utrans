@@ -8,6 +8,7 @@ import socket
 import argparse
 import queue
 import logging
+import tkinter
 
 logging.basicConfig(level = logging.DEBUG)
 
@@ -16,6 +17,7 @@ parser.add_argument("-s", "--server", action="store_true", help="server mode")
 parser.add_argument("--name", default=socket.gethostname(), help="specify a name")
 parser.add_argument("--password", default="hothotdogdog")
 parser.add_argument("--mode", metavar="text | file", default="text")
+parser.add_argument("--gui", action="store_true")
 parser.add_argument("addr", metavar="ip:port", help="listen addr for server")
 
 def get_self_ip():
@@ -34,6 +36,24 @@ def readable_size(size):
         return "%.2fK"%(size / (0x1 << 10))
     else:
         return str(size)
+
+class SimpleFrame(tkinter.Frame):
+    def __init__(self, master, session):
+        super().__init__(master)
+        self["bg"] = "yellow"
+        self.pack(fill=tkinter.BOTH, expand=1)
+        self.init_widget()
+        self.session = session
+    
+    def on_send_text_click(self):
+        msg = self.msg_input_text.get("0.0", tkinter.END)
+        self.session.send_text(msg)
+
+    def init_widget(self):
+        self.msg_input_text = tkinter.Text(self)
+        self.msg_input_text.pack()
+        self.send_button = tkinter.Button(self, text="发送", command=self.on_send_click)
+        self.send_button.pack()
 
 class UtransCLI(UtransContext):
     def __init__(self):
@@ -63,6 +83,14 @@ class UtransCLI(UtransContext):
                 print("\nExit current session to [%s]"%(session.des_name))
                 break
     
+    def message_send_mode_gui(self, session):
+        top = tkinter.Tk()
+        frame = SimpleFrame(top, session)
+        top.title("Utrans")
+        top.mainloop()
+        
+        session.close_active()
+    
     def file_send_mode(self, session):
         while True:
             try:
@@ -73,7 +101,7 @@ class UtransCLI(UtransContext):
                 session.close_active()
                 print("\nExit current session to [%s]"%(session.des_name))
                 break
-    
+
     def run(self):
         # 读取参数
         args = parser.parse_args()
@@ -101,13 +129,19 @@ class UtransCLI(UtransContext):
             session.connect_by_password(self.password, self.des_addr.tcp_addr)
             self.session_queue.put(session)
         while True:
-            session = self.session_queue.get()
+            try:
+                session = self.session_queue.get(timeout=5)
+            except queue.Empty:
+                continue
             if self.mode == "file":
                 self.file_send_mode(session)
             else:
-                self.message_send_mode(session)
-        session.close()
-
+                if args.gui:
+                    self.message_send_mode_gui(session)
+                else:
+                    self.message_send_mode(session)
+            if not self.server_enable:
+                break
     
     def on_connected(self, session):
         print("connect to [%s]"%(session.des_name))
@@ -117,7 +151,7 @@ class UtransCLI(UtransContext):
         print("disconnect from [%s]"%(session.des_name))
     
     def on_recv_text(self, text):
-        print("recv text [%s]"%(text))
+        print("recv text:\n%s"%(text))
     
     def on_recv_file(self, filename, filesize):
         print("recv file [%s], size [%s]"%(filename, readable_size(filesize)))

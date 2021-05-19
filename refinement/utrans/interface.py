@@ -27,8 +27,7 @@ class UtransFileTransHandle:
     def on_progress(self, progress):
         print("progress %.2f"%(progress), end="\r")
 
-class UtransSessionListener():
-    
+class UtransSessionListener(): 
     def on_connected(self, session):
         print("connect to [%s]"%(session.des_name))
 
@@ -36,7 +35,7 @@ class UtransSessionListener():
         print("disconnect from [%s]"%(session.des_name))
     
     def on_recv_text(self, text):
-        print("recv text [%s]"%(text))
+        print("recv text:\n%s"%(text))
     
     def on_recv_file(self, filename, filesize):
         print("recv file [%s], size [%d]"%(filename, filesize))

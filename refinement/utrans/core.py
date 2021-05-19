@@ -172,6 +172,7 @@ class UtransSession:
 
         # 执行认证Utrans认证流程
         # 口令生成密钥
+        # hmac_hash_module在旧版本的pycryotodome中似乎不支持
         key = PBKDF2(password, b'eidhyskodnelwiso', count=1000, hmac_hash_module=SHA256)
         # 生成dh密钥协商数据
         dh_ob = pyDHE.new()
@@ -332,24 +333,25 @@ class UtransSession:
         text = text_bytes.decode("utf8")
         self.listener.on_recv_text(text)
     
-    
     # 主动关闭连接（向对方发送连接关闭的消息）
     def close_active(self):
+        if self.status == UtransSession.S_INIT:
+            return
         self.s_channel.send(Message.pack_session_close().to_bytes())
-        self.close()
+        self.__close()
     
     # 被动关闭连接
     def close_passive(self):
+        if self.status == UtransSession.S_INIT:
+            return
         self.listener.on_disconnected(self)
-        self.close()
+        self.__close()
     
     # 关闭连接，清理资源
-    def close(self):
+    def __close(self):
         self.status = UtransSession.S_INIT
         self.sts.close()
-
-        
-            
+               
 class UtransServer():
 
     def __init__(self, ctx : UtransContext):
