@@ -8,4 +8,6 @@ keys/*
 *.rsa
 .vscode
 utrans_installed
+*.tar.gz
+
 

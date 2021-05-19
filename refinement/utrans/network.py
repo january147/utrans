@@ -1,8 +1,13 @@
 #!/usr/bin/python3
 import hmac
 import hashlib
+import queue
+import threading
+import _thread
 from Crypto.Cipher import AES
 import socket
+import logging
+import traceback
 
 import pdb
 
@@ -19,12 +24,14 @@ Date: 2021-05-17 10:51:19
 |                      payload(payload len bytes)                      |
 |                               mac                                    |
 '''
+
+logger = logging.getLogger("network")
 class STS_pkt:
     MAGIC = 0xaf
     T_PLAIN = 0
     T_ENC = 1
     T_AUTH = 2
-    LEN_FRAME = 1400
+    LEN_FRAME = 65535
     LEN_HEADER = 12
 
     def __init__(self):
@@ -32,12 +39,13 @@ class STS_pkt:
         self.flags = 0
         self.type = STS_pkt.T_PLAIN
         self.payload_len = 0
+        self.channel = 0
         self.mac_len = 0
         self.ophdr_len = 0
         self.seq = 0
         self.payload = None
         self.mac = None
-        self.channel = 0
+        self.llsk = 0
 
     # 处理发送的数据包
     def pack(self, nonce = None, enc_key = None, mac_key = None):
@@ -93,14 +101,14 @@ class STS_pkt:
         self.type |= STS_pkt.T_ENC
 
     # 处理接收的数据包
-    def parse_header_bytes(self, header):
+    def recv_header_bytes(self, header):
         if header[0] != STS_pkt.MAGIC:
+            print(header)
             raise Exception("Bad frame header with magic %x"%header[0])
         self.magic = header[0]
         self.flags = header[1]
         self.type = header[2]
-        # 保留字段
-        # header[3]
+        self.channel = header[3]
         self.payload_len = int.from_bytes(header[4:6], 'little')
         self.mac_len = header[6]
         self.ophdr_len = header[7]
@@ -108,10 +116,10 @@ class STS_pkt:
         # 保存原始header
         self.raw_header = header
     
-    def parse_payload(self, payload):
+    def recv_payload(self, payload):
         self.payload = payload
     
-    def parse_mac(self, mac):
+    def recv_mac(self, mac):
         self.mac = mac
 
     def unpack(self, nonce = None, enc_key = None, mac_key = None):
@@ -137,30 +145,69 @@ class STS_pkt:
         
         return data
 
+class STS_channel:
+    
+    def __init__(self, sts, channel_num = 0):
+        self.sts = sts
+        self.num = channel_num
+        self.spkt = STS_pkt()
+        self.spkt.set_channel(channel_num)
+        self.r_queue = queue.Queue(1024)
+    
+    def send(self, data):
+        self.sts.send(data, self.spkt)
+    
+    def recv(self, timeout = None):
+        return self.r_queue.get(timeout=timeout)
+
+    def enable_auth(self, mac_len):
+        self.spkt.enable_auth(mac_len)
+    
+    def enable_enc(self):
+        self.spkt.enable_enc()
+    
 class STS:
+    S_OK = 0
+    S_DISCONNECTED = 1
+
+    M_SINGLE = 0
+    M_MULTIPLE = 1
+
     Peer_A = 0
     Peer_B = 1
-
-    def __init__(self, channel, peer_type):
+    
+    # llsk表示lower layer socket
+    def __init__(self, llsk, peer_type):
         self.send_enc_key = None
         self.send_mac_key = None
         self.recv_enc_key = None
         self.recv_mac_key = None
         self.send_nonce = None
         self.recv_nonce = None
+        self.lock = threading.Lock()
         self.send_seq = 0
         self.recv_seq = 0
-
+        self.security = STS_pkt.T_PLAIN
         self.peer_type = peer_type
-        self.channel = channel
-        self.spkt = STS_pkt()
+        self.llsk = llsk
+        self.channels = dict()
+        # chnum表示channel number
+        self.next_chnum = 1
         self.rpkt = STS_pkt()
+        self.status = STS.S_OK
+        # M_SINGLE表示不使用channel特性（只有一个主channel，直接使用sts发送和接收数据）
+        self.mode = STS.M_SINGLE
 
+        # 创建主channel
+        self.channels[0] = STS_channel(self)
+        
     def enable_auth(self, auth_key):
         hash_ob = hashlib.new("sha256")
         hash_ob.update(auth_key)
         keys = hash_ob.digest()
-        self.spkt.enable_auth(hash_ob.digest_size)
+        self.security |= STS_pkt.T_AUTH
+        for channel_num in self.channels.keys():
+            self.channels[channel_num].enable_auth(hash_ob.digest_size)
         if self.peer_type == STS.Peer_A:
             self.send_mac_key = keys[0:16]
             self.recv_mac_key = keys[16:]
@@ -174,7 +221,9 @@ class STS:
         keys = hash_ob.digest()
         hash_ob.update(nonce)
         nonces = hash_ob.digest()
-        self.spkt.enable_enc()
+        self.security |= STS_pkt.T_ENC
+        for channel_num in self.channels.keys():
+            self.channels[channel_num].enable_enc()
 
         if self.peer_type == STS.Peer_A:
             self.send_enc_key = keys[0:16]
@@ -188,7 +237,6 @@ class STS:
             self.send_nonce = nonce[10:20]
 
     def enable_security(self, nonce, key):
-        self.spkt.type |= STS_pkt.T_AUTH | STS_pkt.T_ENC
         hash_ob = hashlib.new("sha256")
         hash_ob.update(key)
         keys = hash_ob.digest()
@@ -202,43 +250,176 @@ class STS:
             self.send_seq += 1
         return ret
 
-    def send(self, data):
-        # fill send frame
-        self.spkt.set_payload(data, self.__get_seq())
-        raw_frame = self.spkt.pack(self.send_nonce, self.send_enc_key, self.send_mac_key)
-        self.channel.send(raw_frame)    
-
-    def recv(self):
-        header = self.channel.recv(STS_pkt.LEN_HEADER)
-        self.rpkt.parse_header_bytes(header)
-        self.rpkt.parse_payload(self.channel.recv(self.rpkt.payload_len))
-        if self.rpkt.mac_len != 0:
-            self.rpkt.parse_mac(self.channel.recv(self.rpkt.mac_len))
-        data = self.rpkt.unpack(self.recv_nonce, self.recv_enc_key, self.recv_mac_key)
-        return data
+    def send(self, data, spkt):
+        # default to use channel 0
+        self.lock.acquire()
+        spkt.set_payload(data, self.__get_seq())
+        raw_frame = spkt.pack(self.send_nonce, self.send_enc_key, self.send_mac_key)
+        ret = self.llsk.send(raw_frame)
+        self.lock.release()
+        return ret
     
+    def recv(self):
+        header = bytearray(12)
+        pos = 0
+        while pos < STS_pkt.LEN_HEADER:
+            try:
+                ret = self.llsk.recv_into(memoryview(header)[pos:])
+            except socket.timeout:
+                if self.status != STS.S_OK:
+                    return b''
+                else:
+                    continue
 
+            if ret == 0:
+                self.__connection_broken()
+                raise Exception("Connection broke")
+            pos += ret
+            
+        rpkt = self.rpkt
+        rpkt.recv_header_bytes(header)
 
+        payload = bytearray(rpkt.payload_len)
+        pos = 0
+        while pos < rpkt.payload_len:
+            try:
+                ret = self.llsk.recv_into(memoryview(payload)[pos:])
+            except socket.timeout:
+                if self.status != STS.S_OK:
+                    return b''
+                else:
+                    continue
+            if ret == 0:
+                self.__connection_broken()
+                raise Exception("Connection broke")
+            pos += ret
+        payload = bytes(payload)
+        rpkt.recv_payload(payload)
+
+        if rpkt.mac_len > 0:
+            mac = bytearray(rpkt.mac_len)
+            pos = 0
+            while pos < rpkt.mac_len:
+                try:
+                    ret = self.llsk.recv_into(memoryview(mac)[pos:])
+                except socket.timeout:
+                    if self.status != STS.S_OK:
+                        return b''
+                    else:
+                        continue
+                if ret == 0:
+                    self.__connection_broken()
+                    raise Exception("Connection broke")
+                pos += ret
+            rpkt.recv_mac(mac)
+        
+        data = rpkt.unpack(self.recv_nonce, self.recv_enc_key, self.recv_mac_key)
+        return data
+
+    def __connection_broken(self):
+        if self.status == STS.S_OK:
+            self.status = STS.S_DISCONNECTED
+            for channel_num in self.channels:
+                self.channels[channel_num].r_queue.put(b'')
+
+    def __recv_worker(self):
+        self.llsk.settimeout(5)
+        while self.status == STS.S_OK:
+            data = self.recv()
+            r_queue = self.channels[self.rpkt.channel].r_queue
+            r_queue.put_nowait(data)
+
+    def new_channel(self) -> STS_channel:
+        if self.mode == STS.M_SINGLE:
+            self.mode = STS.M_MULTIPLE
+            _thread.start_new_thread(self.__recv_worker, ())
+        channel = STS_channel(self, self.next_chnum)
+        self.next_chnum += 1
+        if self.security & STS_pkt.T_AUTH:
+            channel.enable_auth(hashlib.new("sha256").digest_size)
+        if self.security & STS_pkt.T_ENC:
+            channel.enable_enc()
+        self.channels[channel.num] = channel
+        logger.debug("create new channel %d"%channel.num)
+        return channel
+    
+    def get_channel(self, channel_num = 0) -> STS_channel:
+        if self.mode == STS.M_SINGLE:
+            self.mode = STS.M_MULTIPLE
+            _thread.start_new_thread(self.__recv_worker, ())
+        return self.channels[channel_num]
+
+    def delete_channel(self, channel_num):
+        # 不允许删除主channel
+        assert channel_num != 0
+        self.channels.pop(channel_num)
+
+    def resume(self, llsk):
+        if self.status == STS.S_DISCONNECTED:
+            self.llsk = llsk
+            self.status = STS.S_OK
+            if self.mode == STS.M_MULTIPLE:
+                _thread.start_new_thread(self.__recv_worker, ())
+        else:
+            raise Exception("Can't resume STS")
+
+    def close(self):
+        self.status = self.S_DISCONNECTED
+        self.llsk.close()
+    
 def server():
     lk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     lk.bind(("127.0.0.1", 9999))
     lk.listen()
 
+    sk, addr = lk.accept()
+    sts = STS(sk, STS.Peer_B)
+    sts.enable_security(b'asdfghjklz', b'qazwsxedcrfvtgby')
+    sts.new_channel()
+    _thread.start_new_thread(recv_file, (sts, "t2_test.tar.gz",1))
+    recv_file(sts, "t1_test.tar.gz", 0)
+    input()
+
+def recv_file(sts, name, channel):
+    f = open(name, "wb")
     while True:
-        sk, addr = lk.accept()
-        sts = STS(sk, STS.Peer_B)
-        sts.enable_security(b'asdfghjklz', b'qazwsxedcrfvtgby')
-        while True:
-            data = sts.recv()
-            print(data)
+        try:
+            data = sts.recv(channel)
+        except:
+            break
+        f.write(data)
+    f.close()
+
 
 def client():
     sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sk.connect(("127.0.0.1", 9999))
     sts = STS(sk, STS.Peer_A)
     sts.enable_security(b'asdfghjklz', b'qazwsxedcrfvtgby')
+    sts.new_channel()
+    f1 = open("t1.tar.gz", "rb")
+    f2 = open("t2.tar.gz", "rb")
+    f1_finished = False
+    f2_finished = False
     while True:
-        sts.send(input("input data:").encode("utf8"))
+        if not f1_finished:
+            data = f1.read(4096)
+            if len(data) != 0:
+                sts.send(data)
+            else:
+                f1_finished = True
+        if not f2_finished:
+            data = f2.read(4096)
+            if len(data) != 0:
+                sts.send(data, 1)
+            else:
+                f2_finished = True
+        if f1_finished and f2_finished:
+            break
+    sts.close()
+    
+    # while True:
+    #     sts.send(input("input data:").encode("utf8"), 1)
 
 if __name__ == "__main__":
     import sys
